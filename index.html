@@ -330,7 +330,7 @@ function parseXLS(wb){
     if(row&&row[1]&&String(row[1]).trim()==='Days'){
       for(let c=0;c<row.length;c++){
         const v=row[c];
-        if(v&&/^\d{2}-[A-Za-z]{3}$/.test(String(v).trim())) dateColMap[c]=String(v).trim();
+const gs = (rx) => sumStr.match(rx)?.[1] || '';
       }
       break;
     }
