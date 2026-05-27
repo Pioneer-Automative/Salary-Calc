@@ -283,7 +283,7 @@ tbody tr:last-child td{border-bottom:none;}
 let employees = [], activeIdx = -1, sortMode = 'emp';
 const BREAK = 30; // minutes
 const WORKING_DAYS = 26;
-const REQUIRED_MINS = 9 * 60; // 540 min = 9 hrs required per present day
+const REQUIRED_MINS = 8 * 60; // 480 min = 8 hrs required per present day
 const DEFAULT_SAL = { '3':15000,'5':15000,'10':15000,'13':15000,'17':15000,
   '21':15000,'35':12000,'36':12000,'46':13000,'48':15000,'59':12000,'62':14000 };
 
@@ -415,7 +415,7 @@ function calcDayEarn(emp,day){
   const r=dailyRate(emp), st=day.status;
   if(!st) return {earned:0,type:'off'};
   if(st==='P'||st==='WOP'){
-    const otMin=parseHHMM(day.ot), otAmt=(otMin/60)*(emp.salary/WORKING_DAYS/9);
+    const otMin=parseHHMM(day.ot), otAmt=(otMin/60)*(emp.salary/WORKING_DAYS/8);
     return {earned:r+otAmt,type:'present'};
   }
   if(st==='A') return {earned:-r,type:'absent'};
@@ -584,7 +584,7 @@ function buildDetailHTML(emp, orig){
       <td class="mono" style="color:${d.outTime&&d.outTime!=='00:00:00'?'var(--text)':'var(--text-muted)'}">${d.outTime&&d.outTime!=='00:00'&&d.outTime!=='00:00:00'?d.outTime:'—'}</td>
       <td class="c mono" style="color:var(--text-muted)">${isPresent?'30 min':'—'}</td>
       <td class="r">${netHrsCell}</td>
-      <td class="r mono" style="color:var(--text-muted);font-size:11px">09:00</td>
+      <td class="r mono" style="color:var(--text-muted);font-size:11px">08:00</td>
       <td class="r mono" style="color:${hasOT?'var(--green)':'var(--text-muted)'}">${hasOT?d.ot:'—'}</td>
       <td class="r mono" style="color:${isLate?'var(--red)':'var(--text-muted)'}">${isLate?d.lateBy:'—'}</td>
       <td class="r mono" ${earnCls}>${earnStr}</td>
@@ -605,7 +605,7 @@ function buildDetailHTML(emp, orig){
       <span style="font-family:var(--mono);font-size:10px;color:rgba(255,255,255,0.55)">Req: ${minsToHHMM(totalReqMins)}</span><br>
       ${totalShortMins>0?`<span style="font-family:var(--mono);font-size:10px;color:#fca5a5">Short: ${minsToHHMM(totalShortMins)}</span>`:`<span style="font-family:var(--mono);font-size:10px;color:#4ade80">✓ Met target</span>`}
     </td>
-    <td class="r" style="font-size:10px;color:rgba(255,255,255,0.55)">09:00/day</td>
+    <td class="r" style="font-size:10px;color:rgba(255,255,255,0.55)">08:00/day</td>
     <td class="r" style="color:#4ade80">${minsToHHMM(totalOTMins)||'—'}</td>
     <td class="r" style="color:#fca5a5">${emp.totalLate||'—'}</td>
     <td class="r" style="color:${totalEarned>=0?'#4ade80':'#fca5a5'};font-size:14px">${inr(totalEarned)}</td>
@@ -641,7 +641,7 @@ function buildDetailHTML(emp, orig){
     ${shortDayCount>0?`<div style="background:rgba(220,38,38,0.07);border-bottom:1px solid rgba(220,38,38,0.15);
       padding:9px 20px;font-size:12px;color:var(--red);display:flex;align-items:center;gap:8px">
       <span class="material-symbols-outlined" style="font-size:16px">warning</span>
-      <strong>${shortDayCount} day${shortDayCount>1?'s':''}</strong> with less than 9 hrs worked — rows highlighted in red below.
+      <strong>${shortDayCount} day${shortDayCount>1?'s':''}</strong> with less than 8 hrs worked — rows highlighted in red below.
       Total shortfall: <strong>${minsToHHMM(totalShortMins)}</strong>
     </div>`:''}
     <div class="tbl-wrap">
@@ -654,7 +654,7 @@ function buildDetailHTML(emp, orig){
             <th>Login Time</th>
             <th>Logoff Time</th>
             <th class="c">Break</th>
-            <th class="r">Net Hrs Worked <span style="font-weight:400;opacity:0.6">(req: 09:00)</span></th>
+            <th class="r">Net Hrs Worked <span style="font-weight:400;opacity:0.6">(req: 08:00)</span></th>
             <th class="r">Required</th>
             <th class="r">OT</th>
             <th class="r">Late By</th>
@@ -665,10 +665,10 @@ function buildDetailHTML(emp, orig){
       </table>
     </div>
     <div style="padding:9px 16px;font-size:11px;color:var(--text-muted);font-style:italic;background:var(--surface-el);display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-      <span>🔴 Red rows = worked &lt; 9 hrs on a present day</span>
+      <span>🔴 Red rows = worked &lt; 8 hrs on a present day</span>
       <span>🔵 Blue rows = Sunday (weekly off)</span>
       <span>Net Hrs = (Logoff − Login) − 30 min break</span>
-      <span>Required = 09:00 per present day</span>
+      <span>Required = 08:00 per present day</span>
     </div>
   </div>`;
 }
