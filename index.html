@@ -410,52 +410,79 @@ function handleFile(file){
 }
 
 // ─── SALARY CALC ──────────────────────────────────────────────
-const SHIFT_START_MINS = 9 * 60;       // 9:00 AM in minutes
-const LATE_GRACE_MINS  = 15;           // buffer: no deduction up to 9:15 AM
-const LATE_CUTOFF_MINS = SHIFT_START_MINS + LATE_GRACE_MINS; // 9:15 AM = 555 mins
+const SHIFT_START_MINS = 9 * 60 + 15;  // 9:15 AM in minutes (555)
+const LATE_GRACE_MINS  = 0;            // no buffer — shift starts exactly at 9:15
+const LATE_CUTOFF_MINS = SHIFT_START_MINS;  // 9:15 AM = 555 mins
 
 function dailyRate(emp){ return (emp.salary||0)/WORKING_DAYS; }
 function hourlyRate(emp){ return dailyRate(emp)/8; } // 8-hr workday basis
 
-// Returns minutes late beyond grace period (0 if on time or within buffer)
+// Returns minutes late beyond shift start (9:15 AM)
+// Excel's lateBy is calculated from 9:00 AM, so subtract 15 mins grace
 function calcLatePenaltyMins(day){
+  // Primary: use Excel lateBy field minus 15 min (Excel counts from 9:00, shift is 9:15)
+  const excelLate = parseHHMMSS(day.lateBy);
+  if(excelLate > 0) return Math.max(0, excelLate - 15);
+  // Fallback: compute from login time vs 9:15 AM
   const inM = timeStrToMins(day.inTime);
   if(inM == null) return 0;
-  return Math.max(0, inM - LATE_CUTOFF_MINS);
+  return Math.max(0, inM - SHIFT_START_MINS);
+}
+
+// Parse HH:MM or HH:MM:SS into total minutes
+function parseHHMMSS(s){
+  if(!s || s==='00:00' || s==='00:00:00') return 0;
+  const p = String(s).split(':');
+  return parseInt(p[0]||0)*60 + parseInt(p[1]||0) + Math.round((parseInt(p[2]||0))/60);
 }
 
 function calcDayEarn(emp, day){
   const r=dailyRate(emp), st=day.status;
-  if(!st) return {earned:0,type:'off',latePenalty:0};
+  if(!st) return {earned:0,type:'off',latePenalty:0,otMins:0,otAmt:0,lateDed:0};
 
   if(st==='P'||st==='WOP'){
-    const netH=calcNetHours(day); // actual mins worked after break
+    const inM  = timeStrToMins(day.inTime);
+    const outM = timeStrToMins(day.outTime);
 
-    // Proportional pay: if worked < 8 hrs, pay only for hours actually worked
+    // ── Net hours worked (raw total − break) ──────────────────
+    const netH = calcNetHours(day); // null if times missing
+
+    // ── OT: always compute from raw in/out times ──────────────
+    // OT = total time in office − (8hr required + 30min break)
+    // This is the only correct way — Excel OT field may use different logic
+    let otMins = 0;
+    if(inM != null && outM != null && outM !== 0){
+      let rawMins = outM > inM ? outM - inM : (24*60 - inM + outM); // past midnight
+      otMins = Math.max(0, rawMins - (REQUIRED_MINS + BREAK)); // beyond 8hr30min
+    } else if(day.ot && day.ot !== '00:00' && day.ot !== '00:00:00'){
+      // Fallback: use Excel OT if we have no in/out times
+      otMins = parseHHMM(day.ot);
+    }
+    const otAmt = otMins > 0 ? (otMins / 60) * hourlyRate(emp) * 1.5 : 0;
+
+    // ── Base pay (proportional if < 8 hrs net worked) ─────────
+    // If employee has OT, they worked full day so base = full daily rate
     let baseEarned;
-    if(netH!=null && netH<REQUIRED_MINS){
-      baseEarned=(netH/REQUIRED_MINS)*r; // fractional day pay
+    if(otMins > 0){
+      baseEarned = r; // worked more than 8hrs, full day guaranteed
+    } else if(netH != null && netH < REQUIRED_MINS){
+      baseEarned = (netH / REQUIRED_MINS) * r; // partial day
     } else {
-      baseEarned=r; // full day
+      baseEarned = r; // full day
     }
 
-    // OT: hours beyond 8 hrs at 1.5× hourly rate
-    let otMins=parseHHMM(day.ot);
-    if(!otMins && netH!=null && netH>REQUIRED_MINS) otMins=netH-REQUIRED_MINS;
-    const otAmt=otMins>0?(otMins/60)*hourlyRate(emp)*1.5:0;
+    // ── Late deduction (after 9:15 AM grace) ──────────────────
+    const latePenMins = calcLatePenaltyMins(day);
+    const lateDed     = latePenMins > 0 ? (latePenMins / 60) * hourlyRate(emp) : 0;
 
-    // Late deduction: deduct pay for every minute arrived after 9:15 AM
-    const latePenMins=calcLatePenaltyMins(day);
-    const lateDed=latePenMins>0?(latePenMins/60)*hourlyRate(emp):0;
-
-    const finalEarned=Math.max(0, baseEarned - lateDed) + otAmt;
-    return {earned:finalEarned, type:'present', latePenalty:latePenMins, lateDed};
+    const finalEarned = Math.max(0, baseEarned - lateDed) + otAmt;
+    return {earned:finalEarned, type:'present', latePenalty:latePenMins, lateDed, otMins, otAmt};
   }
 
-  if(st==='A') return {earned:-r,type:'absent',latePenalty:0,lateDed:0};
-  if(st==='WO') return {earned:0,type:'off',latePenalty:0,lateDed:0};
-  if(st.startsWith('L')) return {earned:r,type:'leave',latePenalty:0,lateDed:0};
-  return {earned:0,type:'off',latePenalty:0,lateDed:0};
+  if(st==='A') return {earned:-r,type:'absent',latePenalty:0,lateDed:0,otMins:0,otAmt:0};
+  if(st==='WO') return {earned:0,type:'off',latePenalty:0,lateDed:0,otMins:0,otAmt:0};
+  if(st.startsWith('L')) return {earned:r,type:'leave',latePenalty:0,lateDed:0,otMins:0,otAmt:0};
+  return {earned:0,type:'off',latePenalty:0,lateDed:0,otMins:0,otAmt:0};
 }
 function netPay(emp){ return emp.days.reduce((s,d)=>s+calcDayEarn(emp,d).earned,0); }
 
@@ -581,25 +608,31 @@ function buildDetailHTML(emp, orig){
 
   let totalEarned=0;
   let rows=emp.days.map(d=>{
-    const {earned, latePenalty=0, lateDed=0}=calcDayEarn(emp,d);
+    const {earned, latePenalty=0, lateDed=0, otMins=0, otAmt=0}=calcDayEarn(emp,d);
     totalEarned+=earned;
     const netH=calcNetHours(d);
     const isPresent=d.status==='P'||d.status==='WOP';
     const isShort=isPresent && netH!=null && netH<REQUIRED_MINS;
-    const isActuallyLate=latePenalty>0; // arrived after 9:15 AM
+    const isActuallyLate=latePenalty>0;
+    const hasComputedOT=isPresent && otMins>0;
     const isWO=d.dayName==='Sun';
     const isSat=d.dayName==='Sat';
-    // Priority: short > weekend > sat
     const rowCls=isShort?'short-row':isWO?'wk-row':isSat?'sat-row':'';
     const earnCls=earned>0?'style="color:var(--green);font-weight:700"':earned<0?'style="color:var(--red);font-weight:700"':'style="color:var(--text-muted)"';
     const earnStr=earned===0?'—':(earned>0?'+':'')+inr(earned);
 
-    // Notes below earned: partial (short hrs) and/or late deduction
+    // Notes below earned
     let earnNotes='';
-    if(isShort&&earned>0) earnNotes+=`<br><span style="font-size:9px;color:var(--red);opacity:0.8">partial hrs</span>`;
-    if(isActuallyLate) earnNotes+=`<br><span style="font-size:9px;color:var(--red);opacity:0.85" title="Arrived ${minsToHHMM(latePenalty)} after 9:15 AM">−${inr(lateDed)} late</span>`;
+    if(isShort&&earned>0)   earnNotes+=`<br><span style="font-size:9px;color:var(--red);opacity:0.8">partial hrs</span>`;
+    if(isActuallyLate) earnNotes+=`<br><span style="font-size:9px;color:var(--red);opacity:0.85">−${inr(lateDed)} late(${minsToHHMM(latePenalty)})</span>`;
+    if(hasComputedOT)       earnNotes+=`<br><span style="font-size:9px;color:var(--green);opacity:0.85" title="OT: ${minsToHHMM(otMins)}">+${inr(otAmt)} OT</span>`;
 
-    const hasOT=d.ot&&d.ot!=='00:00'&&d.ot!=='00:00:00';
+    // OT display: show computed value; if differs from Excel, show both
+    const excelOT = (d.ot && d.ot!=='00:00' && d.ot!=='00:00:00') ? d.ot : null;
+    const computedOTStr = otMins > 0 ? minsToHHMM(otMins) : null;
+    const otDisplay = computedOTStr || excelOT;
+    const otTooltip = `In:${d.inTime||'?'} Out:${d.outTime||'?'} | Computed OT:${computedOTStr||'00:00'} | Excel OT:${excelOT||'00:00'}`;
+
     const isLate=d.lateBy&&d.lateBy!=='00:00'&&d.lateBy!=='00:00:00';
 
     // Net hrs cell: value + progress bar + short tag
@@ -626,8 +659,8 @@ function buildDetailHTML(emp, orig){
       <td class="c mono" style="color:var(--text-muted)">${isPresent?'30 min':'—'}</td>
       <td class="r">${netHrsCell}</td>
       <td class="r mono" style="color:var(--text-muted);font-size:11px">08:00</td>
-      <td class="r mono" style="color:${hasOT?'var(--green)':'var(--text-muted)'}">${hasOT?d.ot:'—'}</td>
-      <td class="r mono" style="color:${isLate?'var(--red)':'var(--text-muted)'}">${isLate?d.lateBy:'—'}</td>
+      <td class="r mono" style="color:${otDisplay?'var(--green)':'var(--text-muted)'}" title="${otTooltip}">${otDisplay||'—'}</td>
+      <td class="r mono" style="color:${isActuallyLate?'var(--red)':'var(--text-muted)'}">${isActuallyLate?minsToHHMM(latePenalty):'—'}</td>
       <td class="r mono" ${earnCls}>${earnStr}${earnNotes}</td>
     </tr>`;
   }).join('');
@@ -710,7 +743,7 @@ function buildDetailHTML(emp, orig){
       <span>🔵 Blue rows = Sunday (weekly off)</span>
       <span>Net Hrs = (Logoff − Login) − 30 min break</span>
       <span>Required = 08:00 per present day</span>
-      <span>⏰ Late deduction applies if login &gt; 9:15 AM (grace: 15 min after 9:00 AM)</span>
+      <span>⏰ Late deduction applies if login &gt; 9:15 AM (shift starts at 9:15 AM sharp)</span>
     </div>
   </div>`;
 }
