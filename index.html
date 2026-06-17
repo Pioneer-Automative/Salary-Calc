@@ -235,7 +235,7 @@ tbody tr:last-child td{border-bottom:none;}
     <button class="btn" id="exportBtn" onclick="exportCSV()" style="display:none">
       <span class="ms material-symbols-outlined">download</span>Export CSV
     </button>
-    <button class="btn btn-accent" onclick="document.getElementById('xlsIn').click()">
+    <button class="btn btn-accent" onclick="openTypeModal()">
       <span class="ms material-symbols-outlined">upload_file</span>Import Excel
     </button>
     <input type="file" id="xlsIn" accept=".xls,.xlsx" style="display:none" onchange="handleFile(this.files[0])"/>
@@ -245,15 +245,15 @@ tbody tr:last-child td{border-bottom:none;}
 <main class="main">
 
   <!-- IMPORT -->
-  <div id="importZone" onclick="document.getElementById('xlsIn').click()"
+  <div id="importZone" onclick="openTypeModal()"
        ondragover="event.preventDefault();this.classList.add('drag')"
        ondragleave="this.classList.remove('drag')"
        ondrop="event.preventDefault();this.classList.remove('drag');handleFile(event.dataTransfer.files[0])">
     <div class="imp-ico"><span class="material-symbols-outlined">table_view</span></div>
     <div class="imp-title">Import Monthly Attendance Report</div>
-    <div class="imp-sub">Drop your attendance <strong>.xls</strong> file here or click to browse.<br>
+    <div class="imp-sub">Click to choose the attendance type, then pick your <strong>.xls</strong> file.<br>
       Works with the office <strong>Company</strong> Monthly_DetailedReport, or a <strong>Shop</strong> raw punch-in/punch-out (All Punch Employee List) report.</div>
-    <button class="btn btn-accent" onclick="event.stopPropagation();document.getElementById('xlsIn').click()">
+    <button class="btn btn-accent" onclick="event.stopPropagation();openTypeModal()">
       <span class="ms material-symbols-outlined">upload_file</span>Choose File
     </button>
     <p style="margin-top:12px;font-size:11px;color:var(--text-muted)">Supports .xls and .xlsx · Data stays in your browser</p>
@@ -265,8 +265,8 @@ tbody tr:last-child td{border-bottom:none;}
       <div class="modal-head">
         <span class="material-symbols-outlined" style="font-size:22px;color:var(--accent)">help</span>
         <div>
-          <div class="modal-title">What kind of attendance file is this?</div>
-          <div class="modal-file" id="typeModalFile"></div>
+          <div class="modal-title" id="typeModalTitle">What kind of attendance file do you have?</div>
+          <div class="modal-file" id="typeModalFile" style="display:none"></div>
         </div>
       </div>
       <div class="modal-options">
@@ -443,27 +443,50 @@ function parseXLS(wb){
 }
 
 // ─── FILE HANDLER ─────────────────────────────────────────────
-let pendingFile = null;
+let selectedType = null;  // set when category is chosen BEFORE picking a file
+let pendingFile  = null;  // set when a file arrives (drag/drop) BEFORE a category was chosen
 
-function handleFile(file){
-  if(!file) return;
-  if(!/\.(xls|xlsx)$/i.test(file.name)){ showToast('Please upload .xls or .xlsx','err'); return; }
-  pendingFile = file;
-  document.getElementById('typeModalFile').textContent = file.name;
+function openTypeModal(){
+  pendingFile = null;
+  document.getElementById('typeModalTitle').textContent = 'What kind of attendance file do you have?';
+  document.getElementById('typeModalFile').style.display = 'none';
   document.getElementById('typeModalOverlay').classList.add('show');
 }
 
 function closeTypeModal(){
   document.getElementById('typeModalOverlay').classList.remove('show');
-  pendingFile = null;
+  pendingFile = null; selectedType = null;
   document.getElementById('xlsIn').value = '';
 }
 
 function chooseAttendanceType(type){
-  const file = pendingFile;
   document.getElementById('typeModalOverlay').classList.remove('show');
+  if(pendingFile){
+    // A file was already dropped — process it now with the chosen category.
+    const file = pendingFile; pendingFile = null;
+    processFile(file, type);
+  } else {
+    // Category chosen first — now open the file picker.
+    selectedType = type;
+    document.getElementById('xlsIn').click();
+  }
+}
+
+function handleFile(file){
   if(!file) return;
-  processFile(file, type);
+  if(!/\.(xls|xlsx)$/i.test(file.name)){ showToast('Please upload .xls or .xlsx','err'); return; }
+  if(selectedType){
+    // Category was already picked (normal flow) — go straight to parsing.
+    const type = selectedType; selectedType = null;
+    processFile(file, type);
+  } else {
+    // File arrived without a category yet (e.g. drag & drop) — ask now.
+    pendingFile = file;
+    document.getElementById('typeModalTitle').textContent = 'What kind of attendance file is this?';
+    document.getElementById('typeModalFile').style.display = 'block';
+    document.getElementById('typeModalFile').textContent = file.name;
+    document.getElementById('typeModalOverlay').classList.add('show');
+  }
 }
 
 function processFile(file, type){
@@ -481,7 +504,7 @@ function processFile(file, type){
       renderAll();
       showToast(`Loaded ${emps.length} employees successfully`,'ok');
     }catch(err){ showToast('Parse error: '+err.message,'err'); console.error(err); }
-    finally{ pendingFile=null; document.getElementById('xlsIn').value=''; }
+    finally{ pendingFile=null; selectedType=null; document.getElementById('xlsIn').value=''; }
   };
   reader.readAsBinaryString(file);
 }
