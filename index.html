@@ -191,6 +191,29 @@ tbody tr:last-child td{border-bottom:none;}
 ::-webkit-scrollbar-track{background:transparent;}
 ::-webkit-scrollbar-thumb{background:var(--surface-br);border-radius:9px;}
 
+/* ── ATTENDANCE TYPE MODAL ── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(11,31,58,0.55);
+  z-index:500;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(2px);}
+.modal-overlay.show{display:flex;}
+.modal-card{background:var(--surface);border-radius:16px;box-shadow:var(--sh-lg);
+  max-width:460px;width:100%;padding:24px;animation:slideDown 0.2s ease;}
+.modal-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:18px;}
+.modal-title{font-size:15px;font-weight:800;}
+.modal-file{font-size:11px;color:var(--text-muted);font-family:var(--mono);margin-top:3px;
+  word-break:break-all;}
+.modal-options{display:flex;flex-direction:column;gap:10px;margin-bottom:14px;}
+.modal-opt{display:flex;align-items:flex-start;gap:12px;text-align:left;width:100%;
+  border:1px solid var(--border);border-radius:12px;padding:14px 16px;background:var(--surface-el);
+  cursor:pointer;transition:all 0.15s;font-family:var(--sans);}
+.modal-opt:hover{border-color:var(--accent);background:var(--accent-light);transform:translateY(-1px);}
+.modal-opt-ico{font-size:24px;flex-shrink:0;margin-top:1px;}
+.modal-opt-title{font-size:13px;font-weight:800;color:var(--text);margin-bottom:3px;}
+.modal-opt-sub{font-size:11px;color:var(--text-muted);line-height:1.5;}
+.modal-cancel{width:100%;padding:9px;border-radius:8px;border:1px solid var(--border);
+  background:none;color:var(--text-muted);font-size:12px;font-weight:600;cursor:pointer;
+  font-family:var(--sans);transition:all 0.15s;}
+.modal-cancel:hover{background:var(--surface-el);color:var(--text);}
+
 @media(max-width:800px){
   .kpi-row{grid-template-columns:repeat(2,1fr);}
   .main{padding:14px;}
@@ -228,12 +251,42 @@ tbody tr:last-child td{border-bottom:none;}
        ondrop="event.preventDefault();this.classList.remove('drag');handleFile(event.dataTransfer.files[0])">
     <div class="imp-ico"><span class="material-symbols-outlined">table_view</span></div>
     <div class="imp-title">Import Monthly Attendance Report</div>
-    <div class="imp-sub">Drop your <strong>Monthly_DetailedReport .xls</strong> here or click to browse.<br>
-      Reads login/logout, break, hours worked, OT, late — everything per day.</div>
+    <div class="imp-sub">Drop your attendance <strong>.xls</strong> file here or click to browse.<br>
+      Works with the office <strong>Company</strong> Monthly_DetailedReport, or a <strong>Shop</strong> raw punch-in/punch-out (All Punch Employee List) report.</div>
     <button class="btn btn-accent" onclick="event.stopPropagation();document.getElementById('xlsIn').click()">
       <span class="ms material-symbols-outlined">upload_file</span>Choose File
     </button>
     <p style="margin-top:12px;font-size:11px;color:var(--text-muted)">Supports .xls and .xlsx · Data stays in your browser</p>
+  </div>
+
+  <!-- ATTENDANCE TYPE MODAL -->
+  <div id="typeModalOverlay" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-head">
+        <span class="material-symbols-outlined" style="font-size:22px;color:var(--accent)">help</span>
+        <div>
+          <div class="modal-title">What kind of attendance file is this?</div>
+          <div class="modal-file" id="typeModalFile"></div>
+        </div>
+      </div>
+      <div class="modal-options">
+        <button class="modal-opt" onclick="chooseAttendanceType('company')">
+          <span class="material-symbols-outlined modal-opt-ico" style="color:var(--blue)">apartment</span>
+          <div class="modal-opt-text">
+            <div class="modal-opt-title">Company Attendance</div>
+            <div class="modal-opt-sub">Office biometric <strong>Monthly_DetailedReport</strong> — has Status/In/Out/LateBy/OT rows per employee block.</div>
+          </div>
+        </button>
+        <button class="modal-opt" onclick="chooseAttendanceType('shop')">
+          <span class="material-symbols-outlined modal-opt-ico" style="color:var(--purple)">storefront</span>
+          <div class="modal-opt-text">
+            <div class="modal-opt-title">Shop Attendance</div>
+            <div class="modal-opt-sub">Raw punch machine export — <strong>All Punch Employee List</strong> with In/Out columns per date.</div>
+          </div>
+        </button>
+      </div>
+      <button class="modal-cancel" onclick="closeTypeModal()">Cancel</button>
+    </div>
   </div>
 
   <!-- DASHBOARD -->
@@ -281,6 +334,8 @@ tbody tr:last-child td{border-bottom:none;}
 <script>
 // ─── STATE ───────────────────────────────────────────────────
 let employees = [], activeIdx = -1, sortMode = 'emp';
+// advance payments: { [empOrigIndex]: [{amount, date, note}] }
+const advances = {};
 const BREAK = 30; // minutes
 const WORKING_DAYS = 26;
 const REQUIRED_MINS = 8 * 60; // 480 min = 8 hrs required per present day
@@ -388,25 +443,189 @@ function parseXLS(wb){
 }
 
 // ─── FILE HANDLER ─────────────────────────────────────────────
+let pendingFile = null;
+
 function handleFile(file){
   if(!file) return;
   if(!/\.(xls|xlsx)$/i.test(file.name)){ showToast('Please upload .xls or .xlsx','err'); return; }
+  pendingFile = file;
+  document.getElementById('typeModalFile').textContent = file.name;
+  document.getElementById('typeModalOverlay').classList.add('show');
+}
+
+function closeTypeModal(){
+  document.getElementById('typeModalOverlay').classList.remove('show');
+  pendingFile = null;
+  document.getElementById('xlsIn').value = '';
+}
+
+function chooseAttendanceType(type){
+  const file = pendingFile;
+  document.getElementById('typeModalOverlay').classList.remove('show');
+  if(!file) return;
+  processFile(file, type);
+}
+
+function processFile(file, type){
   const reader=new FileReader();
   reader.onload=e=>{
     try{
       const wb=XLSX.read(e.target.result,{type:'binary',cellText:true,cellDates:false,raw:false});
-      const emps=parseXLS(wb);
-      if(!emps.length){ showToast('No employee data found','err'); return; }
+      const emps = type==='shop' ? parseShopXLS(wb) : parseXLS(wb);
+      if(!emps.length){ showToast('No employee data found — check this is a '+(type==='shop'?'Shop':'Company')+' attendance file','err'); return; }
       employees=emps; activeIdx=-1;
-      document.getElementById('fileTag').textContent=file.name;
+      document.getElementById('fileTag').textContent=file.name+' · '+(type==='shop'?'Shop':'Company');
       document.getElementById('importZone').style.display='none';
       document.getElementById('dashboard').style.display='block';
       document.getElementById('exportBtn').style.display='inline-flex';
       renderAll();
       showToast(`Loaded ${emps.length} employees successfully`,'ok');
     }catch(err){ showToast('Parse error: '+err.message,'err'); console.error(err); }
+    finally{ pendingFile=null; document.getElementById('xlsIn').value=''; }
   };
   reader.readAsBinaryString(file);
+}
+
+// ─── SHOP ATTENDANCE PARSER (raw punch In/Out export) ─────────
+// Handles "All Punch Employee List" exports from biometric punch machines
+// (e.g. ONtime/Secureye). Structure: a title row with the report period,
+// a date-header row (dd/mm/yyyy, repeated across multiple In/Out column
+// blocks per day), a sub-header row of "In"/"Out" labels, then one row
+// per employee with raw punch timestamps under the matching date columns.
+const SHOP_MONTH_ABBR=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function shopDMYtoDate(dmy){ const [d,m,y]=dmy.split('/').map(Number); return new Date(y,m-1,d); }
+function shopMinsToTime(m){ return pad(Math.floor(m/60))+':'+pad(m%60)+':00'; }
+
+function parseShopXLS(wb){
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const data = XLSX.utils.sheet_to_json(ws,{header:1,defval:null,raw:false});
+
+  // 1) Report period, e.g. "For Period : 01/05/2026 To 31/05/2026"
+  let periodFrom=null, periodTo=null;
+  for(const row of data){
+    if(!row) continue;
+    for(const cell of row){
+      if(cell && /For Period/i.test(String(cell))){
+        const m=String(cell).match(/(\d{2}\/\d{2}\/\d{4})\s*To\s*(\d{2}\/\d{2}\/\d{4})/i);
+        if(m){ periodFrom=m[1]; periodTo=m[2]; }
+      }
+    }
+  }
+
+  // 2) Locate the "EMP Code" header row/column
+  let hdrRow=-1, codeCol=-1;
+  for(let r=0;r<data.length && hdrRow<0;r++){
+    const row=data[r]; if(!row) continue;
+    for(let c=0;c<row.length;c++){
+      if(row[c] && String(row[c]).trim()==='EMP Code'){ hdrRow=r; codeCol=c; break; }
+    }
+  }
+  if(hdrRow<0) return [];
+
+  // 3) Locate the date-header row directly above it (dd/mm/yyyy values)
+  let dateRow=-1;
+  for(let r=hdrRow-1;r>=0 && r>hdrRow-10;r--){
+    const row=data[r]; if(!row) continue;
+    if(row.some(v=>v && /^\d{2}\/\d{2}\/\d{4}$/.test(String(v).trim()))){ dateRow=r; break; }
+  }
+  if(dateRow<0) return [];
+
+  const drow=data[dateRow]||[];
+  let firstDataCol=Infinity;
+  for(let c=0;c<drow.length;c++){ if(drow[c]){ firstDataCol=c; break; } }
+  if(firstDataCol===Infinity) return [];
+
+  // carry the date forward across its (possibly repeated/multi-block) columns
+  const dateOfCol={};
+  let curDate=null;
+  for(let c=0;c<drow.length;c++){
+    const v=drow[c];
+    if(v && /^\d{2}\/\d{2}\/\d{4}$/.test(String(v).trim())) curDate=String(v).trim();
+    if(curDate && c>=firstDataCol) dateOfCol[c]=curDate;
+  }
+
+  // 4) "In"/"Out" sub-header row sits right below the EMP Code header row
+  const subRow=hdrRow+1;
+  const subHdr=data[subRow]||[];
+
+  // fallback period if title row wasn't found: use min/max punched dates later
+  const emps=[];
+  for(let r=subRow+1;r<data.length;r++){
+    const row=data[r]; if(!row) continue;
+    const codeVal=row[codeCol];
+    if(codeVal==null || String(codeVal).trim()==='') continue;
+    const codeStr=String(codeVal).trim();
+    if(!/^\d+$/.test(codeStr)) continue; // skip blank/footer rows e.g. "Generated By..."
+
+    let name='';
+    for(let c=codeCol+1;c<firstDataCol;c++){
+      if(row[c]!=null && String(row[c]).trim()!==''){ name=String(row[c]).trim(); }
+    }
+
+    // gather every punch, grouped by its date, in then out
+    const punchesByDate={};
+    for(let c=firstDataCol;c<row.length;c++){
+      const v=row[c]; if(v==null) continue;
+      const timeStr=String(v).trim(); if(!timeStr) continue;
+      const d=dateOfCol[c]; if(!d) continue;
+      const mins=timeStrToMins(timeStr); if(mins==null) continue;
+      const label=subHdr[c]?String(subHdr[c]).trim():'';
+      if(!punchesByDate[d]) punchesByDate[d]={ins:[],outs:[]};
+      if(/in/i.test(label)) punchesByDate[d].ins.push(mins);
+      else punchesByDate[d].outs.push(mins);
+    }
+
+    let pf=periodFrom, pt=periodTo;
+    if(!pf||!pt){
+      const dates=Object.keys(punchesByDate).sort((a,b)=>shopDMYtoDate(a)-shopDMYtoDate(b));
+      if(!dates.length) continue;
+      pf=dates[0]; pt=dates[dates.length-1];
+    }
+
+    // 5) build one row per calendar day in the period; Sundays with no punch = WO
+    const days=[];
+    let cur=shopDMYtoDate(pf); const end=shopDMYtoDate(pt);
+    while(cur<=end){
+      const dmy=`${pad(cur.getDate())}/${pad(cur.getMonth()+1)}/${cur.getFullYear()}`;
+      const dateStr=pad(cur.getDate())+'-'+SHOP_MONTH_ABBR[cur.getMonth()];
+      const dayName=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][cur.getDay()];
+      const p=punchesByDate[dmy];
+      let status, inTime='', outTime='';
+      if(p && p.ins.length){
+        inTime=shopMinsToTime(Math.min(...p.ins));
+        outTime=p.outs.length?shopMinsToTime(Math.max(...p.outs)):'';
+        status=dayName==='Sun'?'WOP':'P';
+      } else {
+        status=dayName==='Sun'?'WO':'A';
+      }
+      days.push({date:dateStr, dayName, shift:'', inTime, outTime,
+        lateBy:'', earlyBy:'', ot:'', duration:'', tDuration:'', status});
+      cur.setDate(cur.getDate()+1);
+    }
+
+    // 6) roll up totals (late/OT computed the same way the table does per day)
+    let totalOTMins=0, totalLateMins=0;
+    days.forEach(d=>{
+      if(d.status!=='P' && d.status!=='WOP') return;
+      const inM=timeStrToMins(d.inTime), outM=timeStrToMins(d.outTime);
+      if(inM!=null && outM!=null && outM!==0){
+        const rawMins=outM>inM?outM-inM:(24*60-inM+outM);
+        totalOTMins+=Math.max(0, rawMins-(REQUIRED_MINS+BREAK));
+      }
+      totalLateMins+=calcLatePenaltyMins(d);
+    });
+
+    emps.push({
+      code:codeStr, name, desig:'', salary:DEFAULT_SAL[codeStr]||15000,
+      totalPresent:days.filter(d=>d.status==='P').length,
+      totalAbsent:days.filter(d=>d.status==='A').length,
+      totalLeave:0,
+      totalWOP:days.filter(d=>d.status==='WOP').length,
+      totalDur:'', totalOT:minsToHHMM(totalOTMins), totalLate:minsToHHMM(totalLateMins), totalEarly:'',
+      days
+    });
+  }
+  return emps;
 }
 
 // ─── SALARY CALC ──────────────────────────────────────────────
@@ -484,7 +703,12 @@ function calcDayEarn(emp, day){
   if(st.startsWith('L')) return {earned:r,type:'leave',latePenalty:0,lateDed:0,otMins:0,otAmt:0};
   return {earned:0,type:'off',latePenalty:0,lateDed:0,otMins:0,otAmt:0};
 }
-function netPay(emp){ return emp.days.reduce((s,d)=>s+calcDayEarn(emp,d).earned,0); }
+function grossPay(emp){ return emp.days.reduce((s,d)=>s+calcDayEarn(emp,d).earned,0); }
+function totalAdvance(orig){ return (advances[orig]||[]).reduce((s,a)=>s+a.amount,0); }
+function netPay(emp,orig){
+  const o = orig !== undefined ? orig : employees.indexOf(emp);
+  return grossPay(emp) - totalAdvance(o);
+}
 
 // Net hours worked in a day from in/out times
 function calcNetHours(day){
@@ -503,7 +727,7 @@ function renderKPIs(){
   const totP=employees.reduce((s,e)=>s+e.totalPresent,0);
   const totA=employees.reduce((s,e)=>s+e.totalAbsent,0);
   const totOT=employees.reduce((s,e)=>s+parseHHMM(e.totalOT),0);
-  const totPay=employees.reduce((s,e)=>s+netPay(e),0);
+  const totPay=employees.reduce((s,e,i)=>s+netPay(e,i),0);
   // Total working hours (net, all employees)
   const totWrkMins=employees.reduce((s,e)=>s+e.days.reduce((ss,d)=>ss+(calcNetHours(d)||0),0),0);
   document.getElementById('kpiRow').innerHTML=`
@@ -541,7 +765,7 @@ function switchTab(mode){
 function renderEmpList(){
   const list=sortedEmps();
   document.getElementById('empList').innerHTML=list.map((emp,si)=>{
-    const orig=emp._orig, ac=avatarColor(orig), net=netPay(emp);
+    const orig=emp._orig, ac=avatarColor(orig), net=netPay(emp,orig);
     const totalWrkMins=emp.days.reduce((s,d)=>s+(calcNetHours(d)||0),0);
     return `
     <div>
@@ -562,7 +786,7 @@ function renderEmpList(){
           <input class="sal-inp" type="number" value="${emp.salary}" min="0" step="500"
             onclick="event.stopPropagation()" title="Monthly salary"
             onchange="updateSalary(${orig},this.value)"/>
-          <div class="net-pay" style="color:${net>=0?'var(--green)':'var(--red)'}">${inr(net)}</div>
+          <div class="net-pay" style="color:${net>=0?'var(--green)':'var(--red)'}" title="${totalAdvance(orig)>0?'Gross: '+inr(grossPay(emp))+' − Advance: '+inr(totalAdvance(orig)):'Est. Net Pay'}">${inr(net)}${totalAdvance(orig)>0?'<span style="font-size:9px;font-weight:600;color:var(--red);margin-left:3px;font-family:var(--sans)">in-hand</span>':''}</div>
         </div>
         <span class="material-symbols-outlined emp-chevron" style="font-size:20px">chevron_right</span>
       </div>
@@ -583,7 +807,7 @@ function toggleEmp(orig){
 
 // ─── DETAIL PANEL ─────────────────────────────────────────────
 function buildDetailHTML(emp, orig){
-  const ac=avatarColor(orig), net=netPay(emp);
+  const ac=avatarColor(orig), gross=grossPay(emp), advList=advances[orig]||[], advTotal=totalAdvance(orig), net=gross-advTotal;
   const totalWrkMins=emp.days.reduce((s,d)=>s+(calcNetHours(d)||0),0);
   const totalOTMins=parseHHMM(emp.totalOT);
 
@@ -707,8 +931,14 @@ function buildDetailHTML(emp, orig){
       <div class="dp-right">
         <div class="dp-net-lbl">Monthly Salary</div>
         <div class="dp-net-val" style="color:var(--text-muted);font-size:14px">${inr(emp.salary)}</div>
-        <div class="dp-net-lbl" style="margin-top:8px">Est. Net Pay</div>
-        <div class="dp-net-val" style="color:${totalEarned>=0?'var(--green)':'var(--red)'}">${inr(totalEarned)}</div>
+        <div class="dp-net-lbl" style="margin-top:8px">Est. Gross Pay</div>
+        <div class="dp-net-val" style="color:${gross>=0?'var(--green)':'var(--red)'};font-size:18px">${inr(gross)}</div>
+        ${advTotal>0?`
+        <div class="dp-net-lbl" style="margin-top:6px;color:var(--red)">Advance Deducted</div>
+        <div class="dp-net-val" style="color:var(--red);font-size:15px">− ${inr(advTotal)}</div>
+        <div style="border-top:1px dashed var(--border);margin:8px 0"></div>
+        <div class="dp-net-lbl" style="color:var(--accent)">In-Hand Salary</div>
+        <div class="dp-net-val" style="color:${net>=0?'var(--accent)':'var(--red)'};font-size:22px">${inr(net)}</div>`:''}
       </div>
     </div>
     <!-- short-day alert banner -->
@@ -745,7 +975,140 @@ function buildDetailHTML(emp, orig){
       <span>Required = 08:00 per present day</span>
       <span>⏰ Late deduction applies if login &gt; 9:15 AM (shift starts at 9:15 AM sharp)</span>
     </div>
+
+    <!-- ── ADVANCE PAYMENT SECTION ── -->
+    <div style="padding:18px 22px;border-top:2px solid var(--border);background:var(--surface)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
+        <span class="material-symbols-outlined" style="color:var(--red);font-size:20px">money_off</span>
+        <span style="font-size:13px;font-weight:800;color:var(--text)">Advance Payments</span>
+        <span style="font-size:11px;color:var(--text-muted);margin-left:4px">— deducted from gross pay</span>
+      </div>
+
+      <!-- Existing advance entries -->
+      <div id="adv-list-${orig}">
+        ${advList.length===0
+          ? `<div style="font-size:12px;color:var(--text-muted);font-style:italic;padding:6px 0">No advance payments recorded.</div>`
+          : advList.map((a,ai)=>`
+            <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;
+              background:var(--red-light);border:1px solid rgba(220,38,38,0.15);margin-bottom:7px">
+              <span class="material-symbols-outlined" style="color:var(--red);font-size:16px">remove_circle</span>
+              <div style="flex:1">
+                <span style="font-family:var(--mono);font-size:13px;font-weight:700;color:var(--red)">− ${inr(a.amount)}</span>
+                <span style="font-size:11px;color:var(--text-muted);margin-left:10px">📅 ${a.date}</span>
+                ${a.note?`<span style="font-size:11px;color:var(--text-muted);margin-left:8px">· ${a.note}</span>`:''}
+              </div>
+              <button onclick="removeAdvance(${orig},${ai})" title="Remove this entry"
+                style="border:none;background:none;cursor:pointer;color:var(--red);display:flex;align-items:center;opacity:0.7;padding:2px">
+                <span class="material-symbols-outlined" style="font-size:16px">delete</span>
+              </button>
+            </div>`).join('')}
+      </div>
+
+      <!-- Add new advance form -->
+      <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-top:12px;
+        padding:14px;border-radius:10px;background:var(--surface-el);border:1px solid var(--border)">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted)">Amount (₹)</label>
+          <input id="adv-amt-${orig}" type="number" min="0" step="100" placeholder="e.g. 2000"
+            style="border:1px solid var(--border);border-radius:7px;padding:7px 10px;font-family:var(--mono);
+              font-size:13px;font-weight:600;width:130px;outline:none;background:#fff;color:var(--text)"
+            onfocus="this.style.borderColor='var(--red)'"
+            onblur="this.style.borderColor='var(--border)'"/>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted)">Date Paid</label>
+          <input id="adv-date-${orig}" type="date"
+            style="border:1px solid var(--border);border-radius:7px;padding:7px 10px;font-family:var(--mono);
+              font-size:12px;width:150px;outline:none;background:#fff;color:var(--text)"
+            onfocus="this.style.borderColor='var(--red)'"
+            onblur="this.style.borderColor='var(--border)'"/>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:140px">
+          <label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted)">Note (optional)</label>
+          <input id="adv-note-${orig}" type="text" placeholder="e.g. Personal emergency"
+            style="border:1px solid var(--border);border-radius:7px;padding:7px 10px;font-size:12px;
+              outline:none;background:#fff;color:var(--text);width:100%"
+            onfocus="this.style.borderColor='var(--red)'"
+            onblur="this.style.borderColor='var(--border)'"/>
+        </div>
+        <button onclick="addAdvance(${orig})"
+          style="padding:8px 16px;border-radius:7px;border:none;background:var(--red);color:#fff;
+            font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:5px;
+            font-family:var(--sans);white-space:nowrap;box-shadow:0 2px 8px rgba(220,38,38,0.3)">
+          <span class="material-symbols-outlined" style="font-size:15px">add</span>Add Advance
+        </button>
+      </div>
+
+      <!-- Summary bar -->
+      ${gross>0?`
+      <div style="margin-top:14px;padding:12px 16px;border-radius:9px;
+        background:linear-gradient(135deg,rgba(249,115,22,0.04),rgba(249,115,22,0.08));
+        border:1px solid rgba(249,115,22,0.15);display:flex;align-items:center;gap:0;flex-wrap:wrap">
+        <div style="flex:1;min-width:120px;text-align:center;padding:4px 12px;border-right:1px solid rgba(249,115,22,0.2)">
+          <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px">Gross Pay</div>
+          <div style="font-family:var(--mono);font-size:16px;font-weight:800;color:var(--green)">${inr(gross)}</div>
+        </div>
+        <div style="flex:1;min-width:120px;text-align:center;padding:4px 12px;border-right:1px solid rgba(249,115,22,0.2)">
+          <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px">Total Advance</div>
+          <div style="font-family:var(--mono);font-size:16px;font-weight:800;color:${advTotal>0?'var(--red)':'var(--text-muted)'}">${advTotal>0?'− '+inr(advTotal):'₹0'}</div>
+        </div>
+        <div style="flex:1;min-width:120px;text-align:center;padding:4px 12px">
+          <div style="font-size:10px;color:var(--accent);text-transform:uppercase;letter-spacing:0.08em;font-weight:800;margin-bottom:3px">In-Hand Salary</div>
+          <div style="font-family:var(--mono);font-size:20px;font-weight:800;color:${net>=0?'var(--accent)':'var(--red)'}">${inr(net)}</div>
+        </div>
+      </div>`:''}
+    </div>
   </div>`;
+}
+
+// ─── ADVANCE PAYMENTS ─────────────────────────────────────────
+function addAdvance(orig){
+  const amtEl  = document.getElementById('adv-amt-'+orig);
+  const dateEl = document.getElementById('adv-date-'+orig);
+  const noteEl = document.getElementById('adv-note-'+orig);
+
+  const amt  = parseFloat(amtEl.value);
+  const date = dateEl.value;
+  const note = (noteEl.value||'').trim();
+
+  if(!amt || isNaN(amt) || amt<=0){
+    amtEl.style.borderColor='var(--red)';
+    amtEl.focus();
+    showToast('Please enter a valid advance amount','err');
+    return;
+  }
+  if(!date){
+    dateEl.style.borderColor='var(--red)';
+    dateEl.focus();
+    showToast('Please select the date of advance payment','err');
+    return;
+  }
+
+  if(!advances[orig]) advances[orig]=[];
+  advances[orig].push({amount:amt, date, note});
+
+  // reset fields
+  amtEl.value=''; dateEl.value=''; noteEl.value='';
+  amtEl.style.borderColor='';
+
+  showToast(`Advance ${inr(amt)} recorded for ${employees[orig].name.split(' ')[0]}`,'ok');
+  renderAll();
+  // re-open the same panel
+  activeIdx=orig;
+  renderEmpList();
+  setTimeout(()=>{ const el=document.getElementById('detail-'+orig);
+    if(el) el.scrollIntoView({behavior:'smooth',block:'nearest'}); },100);
+}
+
+function removeAdvance(orig, idx){
+  if(!advances[orig]) return;
+  const removed=advances[orig].splice(idx,1)[0];
+  showToast(`Removed advance ${inr(removed.amount)}`,'info');
+  renderAll();
+  activeIdx=orig;
+  renderEmpList();
+  setTimeout(()=>{ const el=document.getElementById('detail-'+orig);
+    if(el) el.scrollIntoView({behavior:'smooth',block:'nearest'}); },100);
 }
 
 // ─── MISC ─────────────────────────────────────────────────────
@@ -766,12 +1129,14 @@ function setAllSalary(){
 
 function exportCSV(){
   const rows=[['Code','Name','Designation','Salary','Present','Absent','WOP','Leave',
-    'Total Hours','OT','Late','Early','Est Net Pay']];
-  employees.forEach(emp=>{
+    'Total Hours','OT','Late','Early','Gross Pay','Total Advance','In-Hand Pay']];
+  employees.forEach((emp,i)=>{
     const wrkMins=emp.days.reduce((s,d)=>s+(calcNetHours(d)||0),0);
+    const gross=Math.round(grossPay(emp));
+    const adv=Math.round(totalAdvance(i));
     rows.push(['EMP-'+emp.code,emp.name,emp.desig,emp.salary,
       emp.totalPresent,emp.totalAbsent,emp.totalWOP,emp.totalLeave,
-      minsToHHMM(wrkMins),emp.totalOT,emp.totalLate,emp.totalEarly,Math.round(netPay(emp))]);
+      minsToHHMM(wrkMins),emp.totalOT,emp.totalLate,emp.totalEarly,gross,adv,gross-adv]);
   });
   const csv=rows.map(r=>r.map(v=>`"${v}"`).join(',')).join('\n');
   const a=document.createElement('a');
