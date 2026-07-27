@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -110,6 +109,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14
 .ch-pu{background:var(--purple-light);color:var(--purple);}
 .ch-gy{background:var(--surface-el);color:var(--text-muted);}
 .emp-salary-area{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;}
+.dept-sel{border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-family:var(--sans);
+  font-size:11px;font-weight:600;color:var(--text);background:var(--surface-el);outline:none;
+  cursor:pointer;max-width:150px;}
+.dept-sel:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(249,115,22,0.1);background:#fff;}
+.dept-sel.unassigned{color:var(--text-muted);font-style:italic;}
 .sal-inp{border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-family:var(--mono);
   font-size:12px;color:var(--accent);font-weight:600;width:100px;text-align:right;outline:none;
   background:var(--surface-el);}
@@ -324,6 +328,9 @@ tbody tr:last-child td{border-bottom:none;}
       <span style="margin-left:6px">· Click any employee row to expand details</span>
     </div>
 
+    <!-- DEPARTMENT FILTER -->
+    <div id="deptFilterRow" style="display:none;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:14px;"></div>
+
     <!-- EMPLOYEE LIST -->
     <div class="emp-list" id="empList"></div>
 
@@ -334,7 +341,12 @@ tbody tr:last-child td{border-bottom:none;}
 
 <script>
 // ─── STATE ───────────────────────────────────────────────────
-let employees = [], activeIdx = -1, sortMode = 'emp';
+let employees = [], activeIdx = -1, sortMode = 'emp', deptFilter = 'all', reportType = null;
+// Shop Attendance only has these 3 fixed departments — manual assignment/
+// correction is offered for Shop files since punch exports don't always
+// carry a reliable Department column. Company Attendance keeps whatever
+// department text (if any) was detected on the sheet and isn't editable here.
+const SHOP_DEPTS = ['Female Support','Male Support','Billing Staff'];
 // advance payments: { [empOrigIndex]: [{amount, date, note}] }
 const advances = {};
 const BREAK = 30; // minutes
@@ -342,6 +354,56 @@ const WORKING_DAYS = 26;
 const REQUIRED_MINS = 8 * 60; // 480 min = 8 hrs required per present day
 const DEFAULT_SAL = { '3':15000,'5':15000,'10':15000,'13':15000,'17':15000,
   '21':15000,'35':12000,'36':12000,'46':13000,'48':15000,'59':12000,'62':14000 };
+
+// ─── DEPARTMENT → SHIFT MAP (Shop Attendance) ──────────────────
+// Each department has its own scheduled shift span. Net required hours =
+// span − break; OT threshold (raw in-office minutes before OT starts) = span.
+function mkDeptShift(sh,sm,eh,em,label){
+  const startMins=sh*60+sm, endMins=eh*60+em, rawMins=endMins-startMins;
+  return {startMins, endMins, rawMins, reqMins: rawMins-BREAK, label};
+}
+const DEPT_SHIFTS = {
+  'female support': mkDeptShift(9,0,18,30,'09:00 AM – 06:30 PM'),
+  'male support':   mkDeptShift(9,0,20,0, '09:00 AM – 08:00 PM'),
+  'billing staff':  mkDeptShift(10,0,20,0,'10:00 AM – 08:00 PM')
+};
+// Matches a raw department string (from the Excel) to a shift, tolerating
+// extra words, casing, punctuation, and word order. Returns null if the
+// department is missing or doesn't resemble any known department — the
+// caller then falls back to the existing default shift logic.
+function matchDeptShift(raw){
+  if(!raw) return null;
+  const norm=String(raw).toLowerCase().replace(/[^a-z]+/g,' ').trim();
+  if(!norm) return null;
+  if(DEPT_SHIFTS[norm]) return DEPT_SHIFTS[norm];
+  for(const key in DEPT_SHIFTS){ if(norm.includes(key)||key.includes(norm)) return DEPT_SHIFTS[key]; }
+  if(/\bbilling\b/.test(norm)) return DEPT_SHIFTS['billing staff'];
+  if(/\bfemale\b/.test(norm) && /\bsupport\b/.test(norm)) return DEPT_SHIFTS['female support'];
+  if(/\bmale\b/.test(norm) && /\bsupport\b/.test(norm)) return DEPT_SHIFTS['male support'];
+  return null;
+}
+// Canonical display name for each DEPT_SHIFTS key — must match SHOP_DEPTS
+// exactly so a parsed department lines up with the manual-assignment dropdown.
+const DEPT_KEY_LABEL = { 'female support':'Female Support', 'male support':'Male Support', 'billing staff':'Billing Staff' };
+// Same fuzzy matching as matchDeptShift, but returns the canonical name
+// string (e.g. 'Billing Staff') instead of the shift object, or '' if the
+// raw text is missing/unrecognized.
+function matchDeptName(raw){
+  if(!raw) return '';
+  const norm=String(raw).toLowerCase().replace(/[^a-z]+/g,' ').trim();
+  if(!norm) return '';
+  if(DEPT_KEY_LABEL[norm]) return DEPT_KEY_LABEL[norm];
+  for(const key in DEPT_KEY_LABEL){ if(norm.includes(key)||key.includes(norm)) return DEPT_KEY_LABEL[key]; }
+  if(/\bbilling\b/.test(norm)) return DEPT_KEY_LABEL['billing staff'];
+  if(/\bfemale\b/.test(norm) && /\bsupport\b/.test(norm)) return DEPT_KEY_LABEL['female support'];
+  if(/\bmale\b/.test(norm) && /\bsupport\b/.test(norm)) return DEPT_KEY_LABEL['male support'];
+  return '';
+}
+function minsToClock(m){
+  if(m==null) return '';
+  let h=Math.floor(m/60), mm=m%60, ap=h<12?'AM':'PM', h12=h%12; if(h12===0) h12=12;
+  return pad(h12)+':'+pad(mm)+' '+ap;
+}
 
 // AVATAR COLORS
 const AVATAR_COLORS = [
@@ -409,6 +471,18 @@ function parseXLS(wb){
     const ns = v => (v==null?'':String(v).trim().replace(/^null$/,''));
     const code = ns(row[6]), name = ns(row[18]), desig = ns(row[24]).replace('Designation -','').trim();
 
+    // Department: look for an explicit "Department -" label anywhere on this
+    // employee's header row (Company reports sometimes carry it alongside
+    // Designation); otherwise fall back to the designation text itself if it
+    // resembles one of the known departments, else leave blank ('Unassigned').
+    let deptRaw='';
+    for(const cell of row){
+      if(cell && /Department\s*-/i.test(String(cell))){
+        deptRaw = String(cell).replace(/.*Department\s*-/i,'').trim(); break;
+      }
+    }
+    if(!deptRaw && matchDeptShift(desig)) deptRaw = desig;
+
     const sumRow=data[r+1]||[], sumStr=String(sumRow[1]||'');
     const gn=(rx)=>parseInt(sumStr.match(rx)?.[1]||0);
     const gs=(rx)=>sumStr.match(rx)?.[1]||'';
@@ -436,7 +510,7 @@ function parseXLS(wb){
       };
     });
 
-    emps.push({ code, name, desig, salary: DEFAULT_SAL[code]||15000,
+    emps.push({ code, name, desig, department: deptRaw||'', salary: DEFAULT_SAL[code]||15000,
       totalPresent, totalAbsent, totalLeave, totalWOP,
       totalDur, totalOT, totalLate, totalEarly, days });
   }
@@ -497,7 +571,7 @@ function processFile(file, type){
       const wb=XLSX.read(e.target.result,{type:'binary',cellText:true,cellDates:false,raw:false});
       const emps = type==='shop' ? parseShopXLS(wb) : parseXLS(wb);
       if(!emps.length){ showToast('No employee data found — check this is a '+(type==='shop'?'Shop':'Company')+' attendance file','err'); return; }
-      employees=emps; activeIdx=-1;
+      employees=emps; activeIdx=-1; reportType=type;
       document.getElementById('fileTag').textContent=file.name+' · '+(type==='shop'?'Shop':'Company');
       document.getElementById('importZone').style.display='none';
       document.getElementById('dashboard').style.display='block';
@@ -572,6 +646,29 @@ function parseShopXLS(wb){
   const subRow=hdrRow+1;
   const subHdr=data[subRow]||[];
 
+  // 4b) Locate "Employee Name" and "Department" header columns explicitly
+  // (on the same row as "EMP Code"), so department text can never be
+  // mistaken for the name, or vice versa, when both are present.
+  let nameHdrCol=-1, deptHdrCol=-1;
+  {
+    const hrow=data[hdrRow]||[];
+    for(let c=0;c<hrow.length;c++){
+      const v=hrow[c]; if(!v) continue;
+      const s=String(v).trim();
+      if(nameHdrCol<0 && /employee\s*name/i.test(s)) nameHdrCol=c;
+      if(deptHdrCol<0 && /depart/i.test(s)) deptHdrCol=c;
+    }
+  }
+  // Does this template have a Department field at all? (checked a bit wider
+  // than just the exact header row, in case of a slightly offset layout.)
+  let deptHeaderFound = deptHdrCol>=0;
+  if(!deptHeaderFound){
+    for(let rr=Math.max(0,hdrRow-2); rr<=Math.min(data.length-1,hdrRow+2); rr++){
+      const rw=data[rr]; if(!rw) continue;
+      if(rw.some(v=>v && /depart/i.test(String(v)))){ deptHeaderFound=true; break; }
+    }
+  }
+
   // fallback period if title row wasn't found: use min/max punched dates later
   const emps=[];
   for(let r=subRow+1;r<data.length;r++){
@@ -581,10 +678,43 @@ function parseShopXLS(wb){
     const codeStr=String(codeVal).trim();
     if(!/^\d+$/.test(codeStr)) continue; // skip blank/footer rows e.g. "Generated By..."
 
-    let name='';
-    for(let c=codeCol+1;c<firstDataCol;c++){
-      if(row[c]!=null && String(row[c]).trim()!==''){ name=String(row[c]).trim(); }
+    // Name: prefer the explicit "Employee Name" header column (with a small
+    // tolerance window for header/data offset), bounded so it can never spill
+    // into the Department column. Falls back to the original heuristic
+    // (last non-empty cell before the punch columns) if no header was found.
+    let name='', nameColUsed=codeCol;
+    if(nameHdrCol>=0){
+      const upper = deptHdrCol>nameHdrCol
+        ? Math.min(nameHdrCol+2, deptHdrCol-1, firstDataCol-1)
+        : Math.min(nameHdrCol+2, firstDataCol-1);
+      for(let c=nameHdrCol;c<=upper;c++){
+        if(row[c]!=null && String(row[c]).trim()!==''){ name=String(row[c]).trim(); nameColUsed=c; break; }
+      }
     }
+    if(!name){
+      for(let c=codeCol+1;c<firstDataCol;c++){
+        if(row[c]!=null && String(row[c]).trim()!==''){ name=String(row[c]).trim(); nameColUsed=c; }
+      }
+    }
+
+    // Department: prefer the explicit header column (small tolerance
+    // window), falling back to scanning between the name and the punch
+    // columns. Only attempted when the sheet actually has a Department field.
+    let deptRaw='';
+    if(deptHeaderFound){
+      if(deptHdrCol>=0){
+        const upper=Math.min(deptHdrCol+2, firstDataCol-1);
+        for(let c=deptHdrCol;c<=upper;c++){
+          if(row[c]!=null && String(row[c]).trim()!==''){ deptRaw=String(row[c]).trim(); break; }
+        }
+      }
+      if(!deptRaw){
+        for(let c=nameColUsed+1;c<firstDataCol;c++){
+          if(row[c]!=null && String(row[c]).trim()!==''){ deptRaw=String(row[c]).trim(); break; }
+        }
+      }
+    }
+    const shiftInfo = matchDeptShift(deptRaw) || DEFAULT_SHIFT;
 
     // gather every punch, grouped by its date, in then out
     const punchesByDate={};
@@ -622,25 +752,30 @@ function parseShopXLS(wb){
       } else {
         status=dayName==='Sun'?'WO':'A';
       }
-      days.push({date:dateStr, dayName, shift:'', inTime, outTime,
+      days.push({date:dateStr, dayName, shift:deptRaw?shiftInfo.label:'', inTime, outTime,
         lateBy:'', earlyBy:'', ot:'', duration:'', tDuration:'', status});
       cur.setDate(cur.getDate()+1);
     }
 
-    // 6) roll up totals (late/OT computed the same way the table does per day)
+    // 6) roll up totals (late/OT computed the same way the table does per day,
+    // using this employee's department shift — or the default if unmatched)
     let totalOTMins=0, totalLateMins=0;
     days.forEach(d=>{
       if(d.status!=='P' && d.status!=='WOP') return;
       const inM=timeStrToMins(d.inTime), outM=timeStrToMins(d.outTime);
       if(inM!=null && outM!=null && outM!==0){
         const rawMins=outM>inM?outM-inM:(24*60-inM+outM);
-        totalOTMins+=Math.max(0, rawMins-(REQUIRED_MINS+BREAK));
+        totalOTMins+=Math.max(0, rawMins-shiftInfo.rawMins);
       }
-      totalLateMins+=calcLatePenaltyMins(d);
+      totalLateMins+=calcLatePenaltyMins({shiftStartMins:shiftInfo.startMins}, d);
     });
 
+    const deptCanon = matchDeptName(deptRaw);
     emps.push({
-      code:codeStr, name, desig:'', salary:DEFAULT_SAL[codeStr]||15000,
+      code:codeStr, name, desig:deptCanon||deptRaw||'', department:deptCanon,
+      shiftStartMins:shiftInfo.startMins, shiftRawMins:shiftInfo.rawMins,
+      shiftReqMins:shiftInfo.reqMins, shiftLabel:shiftInfo.label,
+      salary:DEFAULT_SAL[codeStr]||15000,
       totalPresent:days.filter(d=>d.status==='P').length,
       totalAbsent:days.filter(d=>d.status==='A').length,
       totalLeave:0,
@@ -656,20 +791,28 @@ function parseShopXLS(wb){
 const SHIFT_START_MINS = 9 * 60 + 15;  // 9:15 AM in minutes (555)
 const LATE_GRACE_MINS  = 0;            // no buffer — shift starts exactly at 9:15
 const LATE_CUTOFF_MINS = SHIFT_START_MINS;  // 9:15 AM = 555 mins
+// Default shift used whenever an employee has no department, or one that
+// doesn't match a known mapping — numerically identical to the original
+// hardcoded 9:15 AM / 8hr-required / 8.5hr-OT-threshold logic.
+const DEFAULT_SHIFT = { startMins:SHIFT_START_MINS, endMins:SHIFT_START_MINS+REQUIRED_MINS+BREAK,
+  rawMins:REQUIRED_MINS+BREAK, reqMins:REQUIRED_MINS, label:'Default Shift (09:15 AM)' };
 
 function dailyRate(emp){ return (emp.salary||0)/WORKING_DAYS; }
 function hourlyRate(emp){ return dailyRate(emp)/8; } // 8-hr workday basis
 
-// Returns minutes late beyond shift start (9:15 AM)
-// Excel's lateBy is calculated from 9:00 AM, so subtract 15 mins grace
-function calcLatePenaltyMins(day){
-  // Primary: use Excel lateBy field minus 15 min (Excel counts from 9:00, shift is 9:15)
+// Returns minutes late beyond shift start.
+// Excel's lateBy (Company Attendance) is calculated from 9:00 AM, so subtract
+// 15 mins grace — unaffected by department, since only Company rows carry it.
+// Shop Attendance rows have no lateBy field, so they always fall through to
+// the shift-start comparison, using this employee's department shift start
+// (or the default 9:15 AM if no department was matched).
+function calcLatePenaltyMins(emp, day){
   const excelLate = parseHHMMSS(day.lateBy);
   if(excelLate > 0) return Math.max(0, excelLate - 15);
-  // Fallback: compute from login time vs 9:15 AM
   const inM = timeStrToMins(day.inTime);
   if(inM == null) return 0;
-  return Math.max(0, inM - SHIFT_START_MINS);
+  const startMins = (emp && emp.shiftStartMins!=null) ? emp.shiftStartMins : SHIFT_START_MINS;
+  return Math.max(0, inM - startMins);
 }
 
 // Parse HH:MM or HH:MM:SS into total minutes
@@ -681,6 +824,10 @@ function parseHHMMSS(s){
 
 function calcDayEarn(emp, day){
   const r=dailyRate(emp), st=day.status;
+  // Department shift (Shop Attendance) overrides these when present;
+  // Company Attendance and unmatched/missing departments use the originals.
+  const reqMins   = emp.shiftReqMins!=null ? emp.shiftReqMins : REQUIRED_MINS;
+  const otThresh  = emp.shiftRawMins!=null ? emp.shiftRawMins : (REQUIRED_MINS + BREAK);
   if(!st) return {earned:0,type:'off',latePenalty:0,otMins:0,otAmt:0,lateDed:0};
 
   if(st==='P'||st==='WOP'){
@@ -691,31 +838,31 @@ function calcDayEarn(emp, day){
     const netH = calcNetHours(day); // null if times missing
 
     // ── OT: always compute from raw in/out times ──────────────
-    // OT = total time in office − (8hr required + 30min break)
+    // OT = total time in office − this shift's scheduled span (incl. break)
     // This is the only correct way — Excel OT field may use different logic
     let otMins = 0;
     if(inM != null && outM != null && outM !== 0){
       let rawMins = outM > inM ? outM - inM : (24*60 - inM + outM); // past midnight
-      otMins = Math.max(0, rawMins - (REQUIRED_MINS + BREAK)); // beyond 8hr30min
+      otMins = Math.max(0, rawMins - otThresh); // beyond scheduled shift span
     } else if(day.ot && day.ot !== '00:00' && day.ot !== '00:00:00'){
       // Fallback: use Excel OT if we have no in/out times
       otMins = parseHHMM(day.ot);
     }
     const otAmt = otMins > 0 ? (otMins / 60) * hourlyRate(emp) * 1.5 : 0;
 
-    // ── Base pay (proportional if < 8 hrs net worked) ─────────
-    // If employee has OT, they worked full day so base = full daily rate
+    // ── Base pay (proportional if < required hrs net worked) ──
+    // If employee has OT, they worked a full shift so base = full daily rate
     let baseEarned;
     if(otMins > 0){
-      baseEarned = r; // worked more than 8hrs, full day guaranteed
-    } else if(netH != null && netH < REQUIRED_MINS){
-      baseEarned = (netH / REQUIRED_MINS) * r; // partial day
+      baseEarned = r; // worked more than the required span, full day guaranteed
+    } else if(netH != null && netH < reqMins){
+      baseEarned = (netH / reqMins) * r; // partial day
     } else {
       baseEarned = r; // full day
     }
 
-    // ── Late deduction (after 9:15 AM grace) ──────────────────
-    const latePenMins = calcLatePenaltyMins(day);
+    // ── Late deduction (after shift-start grace) ──────────────
+    const latePenMins = calcLatePenaltyMins(emp, day);
     const lateDed     = latePenMins > 0 ? (latePenMins / 60) * hourlyRate(emp) : 0;
 
     const finalEarned = Math.max(0, baseEarned - lateDed) + otAmt;
@@ -745,7 +892,78 @@ function calcNetHours(day){
 }
 
 // ─── RENDER ALL ───────────────────────────────────────────────
-function renderAll(){ renderKPIs(); renderEmpList(); }
+function renderAll(){ renderKPIs(); renderDeptFilter(); renderEmpList(); }
+
+// ─── DEPARTMENT FILTER ──────────────────────────────────────────
+function getDepartments(){
+  // Shop files always offer the 3 fixed departments (so an admin can move
+  // people into a department that currently has nobody in it), plus
+  // "Unassigned" if any employee hasn't been placed yet. Company files fall
+  // back to whatever department text was actually detected on the sheet.
+  if(reportType==='shop'){
+    const depts=[...SHOP_DEPTS];
+    if(employees.some(e=>!e.department)) depts.push('Unassigned');
+    return depts;
+  }
+  const set=new Set();
+  employees.forEach(e=>{ set.add((e.department&&e.department.trim())?e.department.trim():'Unassigned'); });
+  return Array.from(set).sort((a,b)=>a.localeCompare(b));
+}
+function empDept(e){ return (e.department&&e.department.trim())?e.department.trim():'Unassigned'; }
+
+function renderDeptFilter(){
+  const depts=getDepartments();
+  const row=document.getElementById('deptFilterRow');
+  // Company files: only show the filter once there's more than one department
+  // to choose from. Shop files: always show the fixed 3-department picker.
+  if(reportType!=='shop' && depts.length<2){ row.style.display='none'; row.innerHTML=''; if(deptFilter!=='all'){ deptFilter='all'; } return; }
+  row.style.display='flex';
+  const chip=(val,label,count)=>{
+    const shift=matchDeptShift(val); // null for 'all'/'Unassigned' — no fixed timing
+    return `
+    <button onclick="setDeptFilter('${val.replace(/'/g,"\\'")}')"
+      class="tab-btn" style="padding:6px 14px;height:auto;border:1px solid var(--border);border-radius:12px;
+      flex-direction:column;align-items:flex-start;gap:1px;
+      ${deptFilter===val?'background:var(--accent);color:#fff;border-color:var(--accent)':'background:var(--surface);color:var(--text-muted)'}">
+      <span>${label}<span style="opacity:0.75;font-size:10px;margin-left:4px">${count}</span></span>
+      ${shift?`<span style="font-size:9px;font-weight:400;opacity:0.8">${shift.label}</span>`:''}
+    </button>`;
+  };
+  const totalCount=employees.length;
+  let html=`<span style="font-size:11px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:0.06em;margin-right:2px">Department:</span>`;
+  html+=chip('all','All',totalCount);
+  depts.forEach(d=>{
+    const count=employees.filter(e=>empDept(e)===d).length;
+    html+=chip(d,d,count);
+  });
+  row.innerHTML=html;
+}
+function setDeptFilter(val){
+  deptFilter=val; activeIdx=-1;
+  renderDeptFilter(); renderEmpList();
+}
+
+// Manually set/change an employee's department (Shop Attendance only).
+// Re-derives their shift span (and therefore required hours, OT threshold,
+// and late-penalty basis) from the newly chosen department, then re-renders.
+function setEmpDept(orig, val){
+  const emp=employees[orig];
+  emp.department = val;
+  emp.desig = val; // keep the meta line in sync — desig mirrors department on Shop files
+  const shiftInfo = matchDeptShift(val) || DEFAULT_SHIFT;
+  emp.shiftStartMins = shiftInfo.startMins;
+  emp.shiftRawMins   = shiftInfo.rawMins;
+  emp.shiftReqMins   = shiftInfo.reqMins;
+  emp.shiftLabel     = shiftInfo.label;
+  emp.days.forEach(d=>{ if(d.status==='P'||d.status==='WOP') d.shift = shiftInfo.label; });
+  showToast(`${emp.name.split(' ')[0]} moved to ${val||'Unassigned'}`,'ok');
+  renderAll();
+  if(activeIdx===orig){
+    renderEmpList();
+    setTimeout(()=>{ const el=document.getElementById('detail-'+orig);
+      if(el) el.scrollIntoView({behavior:'smooth',block:'nearest'}); },100);
+  }
+}
 
 function renderKPIs(){
   const totP=employees.reduce((s,e)=>s+e.totalPresent,0);
@@ -773,7 +991,8 @@ function renderKPIs(){
 }
 
 function sortedEmps(){
-  const list=employees.map((e,i)=>({...e,_orig:i}));
+  let list=employees.map((e,i)=>({...e,_orig:i}));
+  if(deptFilter!=='all') list=list.filter(e=>empDept(e)===deptFilter);
   if(sortMode==='alpha') list.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
   return list;
 }
@@ -788,21 +1007,37 @@ function switchTab(mode){
 
 function renderEmpList(){
   const list=sortedEmps();
+  if(!list.length){
+    document.getElementById('empList').innerHTML=`
+      <div style="text-align:center;padding:40px 20px;color:var(--text-muted);font-size:13px">
+        No employees in <strong>${deptFilter}</strong>.
+      </div>`;
+    return;
+  }
   document.getElementById('empList').innerHTML=list.map((emp,si)=>{
     const orig=emp._orig, ac=avatarColor(orig), net=netPay(emp,orig);
     const totalWrkMins=emp.days.reduce((s,d)=>s+(calcNetHours(d)||0),0);
+    const sundaysCount=emp.days.filter(d=>d.dayName==='Sun').length;
+    const deptLabel=empDept(emp);
     return `
     <div>
       <div class="emp-row ${activeIdx===orig?'active':''}" onclick="toggleEmp(${orig})">
         <div class="emp-avatar" style="background:${ac[0]};color:${ac[1]}">${initials(emp.name)}</div>
         <div class="emp-info">
           <div class="emp-name">${emp.name||'(No Name)'}</div>
-          <div class="emp-meta">EMP-${emp.code||'?'}${emp.desig?' · '+emp.desig:''}</div>
+          <div class="emp-meta">EMP-${emp.code||'?'}${reportType!=='shop'&&emp.desig?' · '+emp.desig:''}${reportType!=='shop'&&deptLabel!=='Unassigned'?' · <span style="color:var(--accent)">'+deptLabel+'</span>':''}${reportType==='shop'&&emp.shiftLabel?' · '+emp.shiftLabel:''}</div>
         </div>
+        ${reportType==='shop'?`
+        <select class="dept-sel ${deptLabel==='Unassigned'?'unassigned':''}" onclick="event.stopPropagation()"
+          onchange="setEmpDept(${orig},this.value)" title="Assign department">
+          <option value="" ${!emp.department?'selected':''}>— Unassigned —</option>
+          ${SHOP_DEPTS.map(d=>`<option value="${d}" ${emp.department===d?'selected':''}>${d}</option>`).join('')}
+        </select>`:''}
         <div class="emp-chips">
           <span class="chip ch-gr"><span class="material-symbols-outlined" style="font-size:11px">event_available</span>${emp.totalPresent} Present</span>
           <span class="chip ch-rd">${emp.totalAbsent} Absent</span>
           <span class="chip ch-pu">${emp.totalWOP} WOP</span>
+          <span class="chip ch-gy">${sundaysCount} Sun</span>
           <span class="chip ch-bl">${minsToHHMM(totalWrkMins)} Worked</span>
           ${emp.totalOT?`<span class="chip ch-or">${emp.totalOT} OT</span>`:''}
         </div>
@@ -832,17 +1067,53 @@ function toggleEmp(orig){
 // ─── DETAIL PANEL ─────────────────────────────────────────────
 function buildDetailHTML(emp, orig){
   const ac=avatarColor(orig), gross=grossPay(emp), advList=advances[orig]||[], advTotal=totalAdvance(orig), net=gross-advTotal;
+  const r0=dailyRate(emp);
   const totalWrkMins=emp.days.reduce((s,d)=>s+(calcNetHours(d)||0),0);
   const totalOTMins=parseHHMM(emp.totalOT);
 
-  // Required hours = present+WOP days × 8 hrs
+  // Required hours per present day — this employee's department shift if
+  // matched, else the same default as before this feature existed.
+  const reqMins = emp.shiftReqMins!=null ? emp.shiftReqMins : REQUIRED_MINS;
+  const shiftStartMins = emp.shiftStartMins!=null ? emp.shiftStartMins : SHIFT_START_MINS;
+
+  // Required hours = present+WOP days × this shift's required hours
   const presentDays=emp.days.filter(d=>d.status==='P'||d.status==='WOP').length;
-  const totalReqMins=presentDays*REQUIRED_MINS;  // total required this month
+  const totalReqMins=presentDays*reqMins;  // total required this month
   const totalShortMins=Math.max(0, totalReqMins - totalWrkMins);
   const shortDayCount=emp.days.filter(d=>{
     const st=d.status; if(st!=='P'&&st!=='WOP') return false;
-    const h=calcNetHours(d); return h!=null && h<REQUIRED_MINS;
+    const h=calcNetHours(d); return h!=null && h<reqMins;
   }).length;
+
+  // Working days: days actually worked (Present + WOP) vs the monthly
+  // working-day norm used for the daily-rate calculation.
+  const daysWorked=presentDays;
+  const totalSundays=emp.days.filter(d=>d.dayName==='Sun').length;
+  const leavesTaken=Math.max(emp.totalLeave||0, emp.days.filter(d=>(d.status||'').startsWith('L')).length);
+
+  // ── Salary deduction reasons ────────────────────────────────
+  // Walk every day once and bucket the earned/deducted amount by reason,
+  // so the person can see exactly why the gross pay differs from the
+  // straight (salary ÷ working days × days worked) figure.
+  let dedAbsentDays=0, dedAbsentAmt=0;
+  let dedLateDays=0, dedLateMins=0, dedLateAmt=0;
+  let dedShortDays=0, dedShortMins=0, dedShortAmt=0;
+  let otDays=0, otMinsTotal=0, otAmtTotal=0;
+  emp.days.forEach(d=>{
+    const st=d.status;
+    const {latePenalty=0, lateDed=0, otMins=0, otAmt=0}=calcDayEarn(emp,d);
+    if(st==='A'){ dedAbsentDays++; dedAbsentAmt+=r0; }
+    if(latePenalty>0){ dedLateDays++; dedLateMins+=latePenalty; dedLateAmt+=lateDed; }
+    if((st==='P'||st==='WOP')){
+      const netH=calcNetHours(d);
+      if(netH!=null && netH<reqMins && latePenalty<=0){
+        // partial-day shortfall not already explained by lateness
+        const shortBy=reqMins-netH;
+        dedShortDays++; dedShortMins+=shortBy; dedShortAmt+=(shortBy/60)*r0/8;
+      }
+    }
+    if(otMins>0){ otDays++; otMinsTotal+=otMins; otAmtTotal+=otAmt; }
+  });
 
   const statusBadge=s=>{
     if(!s) return `<span class="badge b-gy">—</span>`;
@@ -860,7 +1131,7 @@ function buildDetailHTML(emp, orig){
     totalEarned+=earned;
     const netH=calcNetHours(d);
     const isPresent=d.status==='P'||d.status==='WOP';
-    const isShort=isPresent && netH!=null && netH<REQUIRED_MINS;
+    const isShort=isPresent && netH!=null && netH<reqMins;
     const isActuallyLate=latePenalty>0;
     const hasComputedOT=isPresent && otMins>0;
     const isWO=d.dayName==='Sun';
@@ -886,9 +1157,9 @@ function buildDetailHTML(emp, orig){
     // Net hrs cell: value + progress bar + short tag
     let netHrsCell;
     if(netH!=null){
-      const pct=Math.min(100,Math.round(netH/REQUIRED_MINS*100));
+      const pct=Math.min(100,Math.round(netH/reqMins*100));
       const barColor=isShort?'var(--red)':'var(--green)';
-      const shortBy=isShort?REQUIRED_MINS-netH:0;
+      const shortBy=isShort?reqMins-netH:0;
       netHrsCell=`<div class="hrs-cell">
         <span class="mono" style="font-weight:700;color:${isShort?'var(--red)':'var(--text)'}">${minsToHHMM(netH)}${isShort?`<span class="short-tag">−${minsToHHMM(shortBy)}</span>`:''}</span>
         <div class="hrs-bar-wrap"><div class="hrs-bar-fill" style="width:${pct}%;background:${barColor}"></div></div>
@@ -906,7 +1177,7 @@ function buildDetailHTML(emp, orig){
       <td class="mono" style="color:${d.outTime&&d.outTime!=='00:00:00'?'var(--text)':'var(--text-muted)'}">${d.outTime&&d.outTime!=='00:00'&&d.outTime!=='00:00:00'?d.outTime:'—'}</td>
       <td class="c mono" style="color:var(--text-muted)">${isPresent?'30 min':'—'}</td>
       <td class="r">${netHrsCell}</td>
-      <td class="r mono" style="color:var(--text-muted);font-size:11px">08:00</td>
+      <td class="r mono" style="color:var(--text-muted);font-size:11px">${minsToHHMM(reqMins)}</td>
       <td class="r mono" style="color:${otDisplay?'var(--green)':'var(--text-muted)'}" title="${otTooltip}">${otDisplay||'—'}</td>
       <td class="r mono" style="color:${isActuallyLate?'var(--red)':'var(--text-muted)'}">${isActuallyLate?minsToHHMM(latePenalty):'—'}</td>
       <td class="r mono" ${earnCls}>${earnStr}${earnNotes}</td>
@@ -927,7 +1198,7 @@ function buildDetailHTML(emp, orig){
       <span style="font-family:var(--mono);font-size:10px;color:rgba(255,255,255,0.55)">Req: ${minsToHHMM(totalReqMins)}</span><br>
       ${totalShortMins>0?`<span style="font-family:var(--mono);font-size:10px;color:#fca5a5">Short: ${minsToHHMM(totalShortMins)}</span>`:`<span style="font-family:var(--mono);font-size:10px;color:#4ade80">✓ Met target</span>`}
     </td>
-    <td class="r" style="font-size:10px;color:rgba(255,255,255,0.55)">08:00/day</td>
+    <td class="r" style="font-size:10px;color:rgba(255,255,255,0.55)">${minsToHHMM(reqMins)}/day</td>
     <td class="r" style="color:#4ade80">${minsToHHMM(totalOTMins)||'—'}</td>
     <td class="r" style="color:#fca5a5">${emp.totalLate||'—'}</td>
     <td class="r" style="color:${totalEarned>=0?'#4ade80':'#fca5a5'};font-size:14px">${inr(totalEarned)}</td>
@@ -940,7 +1211,15 @@ function buildDetailHTML(emp, orig){
       </div>
       <div style="flex:1;min-width:0">
         <div class="dp-emp-name">${emp.name||'(No Name)'}</div>
-        <div class="dp-emp-meta">EMP-${emp.code||'?'}${emp.desig?' · '+emp.desig:''}</div>
+        <div class="dp-emp-meta">EMP-${emp.code||'?'}${reportType!=='shop'&&emp.desig?' · '+emp.desig:''}${reportType!=='shop'&&empDept(emp)!=='Unassigned'?' · <span style="color:var(--accent)">'+empDept(emp)+'</span>':''}${reportType==='shop'&&emp.shiftLabel?' · '+emp.shiftLabel:''}</div>
+        ${reportType==='shop'?`
+        <div style="margin-top:6px">
+          <select class="dept-sel ${empDept(emp)==='Unassigned'?'unassigned':''}"
+            onchange="setEmpDept(${orig},this.value)" title="Assign department">
+            <option value="" ${!emp.department?'selected':''}>— Unassigned —</option>
+            ${SHOP_DEPTS.map(d=>`<option value="${d}" ${emp.department===d?'selected':''}>${d}</option>`).join('')}
+          </select>
+        </div>`:''}
         <div class="dp-stats">
           <div class="dp-stat"><div class="dp-stat-val" style="color:var(--green)">${emp.totalPresent}</div><div class="dp-stat-lbl">Present</div></div>
           <div class="dp-stat"><div class="dp-stat-val" style="color:var(--red)">${emp.totalAbsent}</div><div class="dp-stat-lbl">Absent</div></div>
@@ -950,6 +1229,9 @@ function buildDetailHTML(emp, orig){
           <div class="dp-stat"><div class="dp-stat-val" style="color:${totalShortMins>0?'var(--red)':'var(--green)'}">${totalShortMins>0?'−'+minsToHHMM(totalShortMins):'✓ OK'}</div><div class="dp-stat-lbl">Short/Extra</div></div>
           <div class="dp-stat"><div class="dp-stat-val" style="color:${shortDayCount>0?'var(--red)':'var(--green)'}">${shortDayCount}</div><div class="dp-stat-lbl">Short Days</div></div>
           <div class="dp-stat"><div class="dp-stat-val" style="color:var(--accent)">${minsToHHMM(totalOTMins)||'—'}</div><div class="dp-stat-lbl">Total OT</div></div>
+          <div class="dp-stat"><div class="dp-stat-val" style="color:var(--blue)">${daysWorked} / ${WORKING_DAYS}</div><div class="dp-stat-lbl">Working Days (Taken/Actual)</div></div>
+          <div class="dp-stat"><div class="dp-stat-val" style="color:var(--text-muted)">${totalSundays}</div><div class="dp-stat-lbl">Total Sundays</div></div>
+          <div class="dp-stat"><div class="dp-stat-val" style="color:${leavesTaken>0?'var(--accent)':'var(--text-muted)'}">${leavesTaken}</div><div class="dp-stat-lbl">Leaves Taken</div></div>
         </div>
       </div>
       <div class="dp-right">
@@ -972,6 +1254,40 @@ function buildDetailHTML(emp, orig){
       <strong>${shortDayCount} day${shortDayCount>1?'s':''}</strong> with less than 8 hrs worked — rows highlighted in red below.
       Total shortfall: <strong>${minsToHHMM(totalShortMins)}</strong>
     </div>`:''}
+    <!-- SALARY DEDUCTION REASONS -->
+    ${(dedAbsentDays||dedLateDays||dedShortDays||otDays||advTotal>0)?`
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);background:var(--surface-el)">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;color:var(--text-muted);margin-bottom:10px">
+        Salary Deduction Reasons
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px">
+        ${dedAbsentDays>0?`
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px">
+          <span><span class="badge b-rd" style="margin-right:6px">Absent</span>${dedAbsentDays} day${dedAbsentDays>1?'s':''} not worked</span>
+          <span class="mono" style="font-weight:700;color:var(--red)">− ${inr(dedAbsentAmt)}</span>
+        </div>`:''}
+        ${dedLateDays>0?`
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px">
+          <span><span class="badge b-or" style="margin-right:6px">Late Arrival</span>${dedLateDays} day${dedLateDays>1?'s':''}, ${minsToHHMM(dedLateMins)} total late</span>
+          <span class="mono" style="font-weight:700;color:var(--red)">− ${inr(dedLateAmt)}</span>
+        </div>`:''}
+        ${dedShortDays>0?`
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px">
+          <span><span class="badge b-rd" style="margin-right:6px">Partial Hours</span>${dedShortDays} day${dedShortDays>1?'s':''} short by ${minsToHHMM(dedShortMins)} total</span>
+          <span class="mono" style="font-weight:700;color:var(--red)">− ${inr(dedShortAmt)}</span>
+        </div>`:''}
+        ${advTotal>0?`
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px">
+          <span><span class="badge b-rd" style="margin-right:6px">Advance Paid</span>${advList.length} payment${advList.length>1?'s':''} recorded</span>
+          <span class="mono" style="font-weight:700;color:var(--red)">− ${inr(advTotal)}</span>
+        </div>`:''}
+        ${otDays>0?`
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px">
+          <span><span class="badge b-gr" style="margin-right:6px">Overtime</span>${otDays} day${otDays>1?'s':''}, ${minsToHHMM(otMinsTotal)} total OT</span>
+          <span class="mono" style="font-weight:700;color:var(--green)">+ ${inr(otAmtTotal)}</span>
+        </div>`:''}
+      </div>
+    </div>`:''}
     <div class="tbl-wrap">
       <table>
         <thead>
@@ -982,7 +1298,7 @@ function buildDetailHTML(emp, orig){
             <th>Login Time</th>
             <th>Logoff Time</th>
             <th class="c">Break</th>
-            <th class="r">Net Hrs Worked <span style="font-weight:400;opacity:0.6">(req: 08:00)</span></th>
+            <th class="r">Net Hrs Worked <span style="font-weight:400;opacity:0.6">(req: ${minsToHHMM(reqMins)})</span></th>
             <th class="r">Required</th>
             <th class="r">OT</th>
             <th class="r">Late By</th>
@@ -996,8 +1312,8 @@ function buildDetailHTML(emp, orig){
       <span>🔴 Red rows = worked &lt; 8 hrs on a present day</span>
       <span>🔵 Blue rows = Sunday (weekly off)</span>
       <span>Net Hrs = (Logoff − Login) − 30 min break</span>
-      <span>Required = 08:00 per present day</span>
-      <span>⏰ Late deduction applies if login &gt; 9:15 AM (shift starts at 9:15 AM sharp)</span>
+      <span>Required = ${minsToHHMM(reqMins)} per present day${emp.shiftLabel&&emp.department?' ('+emp.shiftLabel+' shift)':''}</span>
+      <span>⏰ Late deduction applies if login &gt; ${minsToClock(shiftStartMins)} (shift starts at ${minsToClock(shiftStartMins)} sharp)</span>
     </div>
 
     <!-- ── ADVANCE PAYMENT SECTION ── -->
@@ -1152,14 +1468,16 @@ function setAllSalary(){
 }
 
 function exportCSV(){
-  const rows=[['Code','Name','Designation','Salary','Present','Absent','WOP','Leave',
-    'Total Hours','OT','Late','Early','Gross Pay','Total Advance','In-Hand Pay']];
+  const rows=[['Code','Name','Department','Designation','Salary','Present','Absent','WOP','Leave',
+    'Total Sundays','Total Hours','OT','Late','Early','Gross Pay','Total Advance','In-Hand Pay']];
   employees.forEach((emp,i)=>{
     const wrkMins=emp.days.reduce((s,d)=>s+(calcNetHours(d)||0),0);
     const gross=Math.round(grossPay(emp));
     const adv=Math.round(totalAdvance(i));
-    rows.push(['EMP-'+emp.code,emp.name,emp.desig,emp.salary,
-      emp.totalPresent,emp.totalAbsent,emp.totalWOP,emp.totalLeave,
+    const sundays=emp.days.filter(d=>d.dayName==='Sun').length;
+    const leaves=Math.max(emp.totalLeave||0, emp.days.filter(d=>(d.status||'').startsWith('L')).length);
+    rows.push(['EMP-'+emp.code,emp.name,empDept(emp),emp.desig,emp.salary,
+      emp.totalPresent,emp.totalAbsent,emp.totalWOP,leaves,sundays,
       minsToHHMM(wrkMins),emp.totalOT,emp.totalLate,emp.totalEarly,gross,adv,gross-adv]);
   });
   const csv=rows.map(r=>r.map(v=>`"${v}"`).join(',')).join('\n');
