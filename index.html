@@ -364,12 +364,20 @@ const REQUIRED_MINS = 8 * 60; // 480 min = 8 hrs required per present day
 const DEFAULT_SAL = { '3':15000,'5':15000,'10':15000,'13':15000,'17':15000,
   '21':15000,'35':12000,'36':12000,'46':13000,'48':15000,'59':12000,'62':14000 };
 
+const SHOP_LATE_GRACE_MINS = 15; // Shop staff can clock in up to 15 min after
+                                  // shift start without a late deduction —
+                                  // required hours / OT threshold are unaffected.
+
 // ─── DEPARTMENT → SHIFT MAP (Shop Attendance) ──────────────────
 // Each department has its own scheduled shift span. Net required hours =
 // span − break; OT threshold (raw in-office minutes before OT starts) = span.
+// lateCutoffMins is separate from startMins: it's only used to decide when a
+// login counts as "late" (start + grace period), and never changes the
+// required hours or OT threshold, which are still based on the raw shift span.
 function mkDeptShift(sh,sm,eh,em,label){
   const startMins=sh*60+sm, endMins=eh*60+em, rawMins=endMins-startMins;
-  return {startMins, endMins, rawMins, reqMins: rawMins-BREAK, label};
+  return {startMins, endMins, rawMins, reqMins: rawMins-BREAK, label,
+    lateCutoffMins: startMins + SHOP_LATE_GRACE_MINS};
 }
 const DEPT_SHIFTS = {
   'female support': mkDeptShift(9,0,18,30,'09:00 AM – 06:30 PM'),
@@ -778,7 +786,7 @@ function parseShopXLS(wb){
         const rawMins=outM>inM?outM-inM:(24*60-inM+outM);
         totalOTMins+=Math.max(0, rawMins-shiftInfo.rawMins);
       }
-      totalLateMins+=calcLatePenaltyMins({shiftStartMins:shiftInfo.startMins}, d);
+      totalLateMins+=calcLatePenaltyMins({shiftLateCutoffMins:shiftInfo.lateCutoffMins}, d);
     });
 
     const deptCanon = matchDeptName(deptRaw);
@@ -786,6 +794,7 @@ function parseShopXLS(wb){
       code:codeStr, name, desig:deptCanon||deptRaw||'', department:deptCanon,
       shiftStartMins:shiftInfo.startMins, shiftRawMins:shiftInfo.rawMins,
       shiftReqMins:shiftInfo.reqMins, shiftLabel:shiftInfo.label,
+      shiftLateCutoffMins:shiftInfo.lateCutoffMins,
       salary:DEFAULT_SAL[codeStr]||15000,
       totalPresent:days.filter(d=>d.status==='P').length,
       totalAbsent:days.filter(d=>d.status==='A').length,
@@ -804,9 +813,14 @@ const LATE_GRACE_MINS  = 0;            // no buffer — shift starts exactly at 
 const LATE_CUTOFF_MINS = SHIFT_START_MINS;  // 9:15 AM = 555 mins
 // Default shift used whenever an employee has no department, or one that
 // doesn't match a known mapping — numerically identical to the original
-// hardcoded 9:15 AM / 8hr-required / 8.5hr-OT-threshold logic.
+// hardcoded 9:15 AM / 8hr-required / 8.5hr-OT-threshold logic. Its grace
+// period is already baked into SHIFT_START_MINS (raw 9:00 AM + 15 min),
+// so lateCutoffMins is the same value here — unlike Shop dept shifts, where
+// startMins is the literal shift-start clock time and the grace is added
+// separately via lateCutoffMins.
 const DEFAULT_SHIFT = { startMins:SHIFT_START_MINS, endMins:SHIFT_START_MINS+REQUIRED_MINS+BREAK,
-  rawMins:REQUIRED_MINS+BREAK, reqMins:REQUIRED_MINS, label:'Default Shift (09:15 AM)' };
+  rawMins:REQUIRED_MINS+BREAK, reqMins:REQUIRED_MINS, label:'Default Shift (09:15 AM)',
+  lateCutoffMins:SHIFT_START_MINS };
 
 function dailyRate(emp){ return (emp.salary||0)/WORKING_DAYS; }
 // Hourly rate = daily rate ÷ that employee's actual required hours for their
@@ -832,8 +846,9 @@ function calcLatePenaltyMins(emp, day){
   if(excelLate > 0) return Math.max(0, excelLate - 15);
   const inM = timeStrToMins(day.inTime);
   if(inM == null) return 0;
-  const startMins = (emp && emp.shiftStartMins!=null) ? emp.shiftStartMins : SHIFT_START_MINS;
-  return Math.max(0, inM - startMins);
+  const cutoffMins = (emp && emp.shiftLateCutoffMins!=null) ? emp.shiftLateCutoffMins
+    : (emp && emp.shiftStartMins!=null) ? emp.shiftStartMins : SHIFT_START_MINS;
+  return Math.max(0, inM - cutoffMins);
 }
 
 // Parse HH:MM or HH:MM:SS into total minutes
@@ -976,6 +991,7 @@ function setEmpDept(orig, val){
   emp.shiftRawMins   = shiftInfo.rawMins;
   emp.shiftReqMins   = shiftInfo.reqMins;
   emp.shiftLabel     = shiftInfo.label;
+  emp.shiftLateCutoffMins = shiftInfo.lateCutoffMins;
   emp.days.forEach(d=>{ if(d.status==='P'||d.status==='WOP') d.shift = shiftInfo.label; });
   showToast(`${emp.name.split(' ')[0]} moved to ${val||'Unassigned'}`,'ok');
   renderAll();
@@ -1096,6 +1112,7 @@ function buildDetailHTML(emp, orig){
   // matched, else the same default as before this feature existed.
   const reqMins = emp.shiftReqMins!=null ? emp.shiftReqMins : REQUIRED_MINS;
   const shiftStartMins = emp.shiftStartMins!=null ? emp.shiftStartMins : SHIFT_START_MINS;
+  const shiftLateCutoffMins = emp.shiftLateCutoffMins!=null ? emp.shiftLateCutoffMins : shiftStartMins;
 
   // Required hours = present+WOP days × this shift's required hours
   const presentDays=emp.days.filter(d=>d.status==='P'||d.status==='WOP').length;
@@ -1349,7 +1366,7 @@ function buildDetailHTML(emp, orig){
       <span>🔵 Blue rows = Sunday (weekly off)</span>
       <span>Net Hrs = (Logoff − Login) − 30 min break</span>
       <span>Required = ${minsToHHMM(reqMins)} per present day${emp.shiftLabel&&emp.department?' ('+emp.shiftLabel+' shift)':''}</span>
-      <span>⏰ Late deduction applies if login &gt; ${minsToClock(shiftStartMins)} (shift starts at ${minsToClock(shiftStartMins)} sharp)</span>
+      <span>⏰ Late deduction applies if login &gt; ${minsToClock(shiftLateCutoffMins)} (shift starts ${minsToClock(shiftStartMins)}${shiftLateCutoffMins>shiftStartMins?', '+(shiftLateCutoffMins-shiftStartMins)+' min grace':' sharp'})</span>
     </div>
 
     <!-- ── ADVANCE PAYMENT SECTION ── -->
