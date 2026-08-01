@@ -809,7 +809,17 @@ const DEFAULT_SHIFT = { startMins:SHIFT_START_MINS, endMins:SHIFT_START_MINS+REQ
   rawMins:REQUIRED_MINS+BREAK, reqMins:REQUIRED_MINS, label:'Default Shift (09:15 AM)' };
 
 function dailyRate(emp){ return (emp.salary||0)/WORKING_DAYS; }
-function hourlyRate(emp){ return dailyRate(emp)/8; } // 8-hr workday basis
+// Hourly rate = daily rate ÷ that employee's actual required hours for their
+// shift — NOT a hardcoded 8. Company/default employees have an 8-hr required
+// shift so this is numerically the same as before for them. But Shop staff
+// have different required hours per department (Female Support 9 hrs,
+// Male Support 10.5 hrs, Billing Staff 9.5 hrs) — using a flat 8 there was
+// overstating the hourly rate, which in turn overstated both OT pay and
+// late-arrival deductions for all three Shop departments.
+function hourlyRate(emp){
+  const reqHrs = (emp.shiftReqMins!=null ? emp.shiftReqMins : REQUIRED_MINS) / 60;
+  return dailyRate(emp) / (reqHrs>0 ? reqHrs : 8);
+}
 
 // Returns minutes late beyond shift start.
 // Excel's lateBy (Company Attendance) is calculated from 9:00 AM, so subtract
