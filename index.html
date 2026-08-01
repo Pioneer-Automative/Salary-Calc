@@ -7,6 +7,9 @@
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
 :root{
   --bg:#f4f6fa;--surface:#ffffff;--surface-el:#eef1f7;--surface-br:#e2e7f0;
@@ -238,7 +241,13 @@ tbody tr:last-child td{border-bottom:none;}
   </div>
   <div style="display:flex;align-items:center;gap:8px;">
     <button class="btn" id="exportBtn" onclick="exportCSV()" style="display:none">
-      <span class="ms material-symbols-outlined">download</span>Export CSV
+      <span class="ms material-symbols-outlined">download</span>Summary CSV
+    </button>
+    <button class="btn" id="exportDetailedBtn" onclick="exportDetailedCSV()" style="display:none">
+      <span class="ms material-symbols-outlined">calendar_month</span>Day-wise CSV (All)
+    </button>
+    <button class="btn" id="exportAllPdfBtn" onclick="exportAllEmployeePDFs()" style="display:none">
+      <span class="ms material-symbols-outlined">picture_as_pdf</span>All PDFs (ZIP)
     </button>
     <button class="btn btn-accent" onclick="openTypeModal()">
       <span class="ms material-symbols-outlined">upload_file</span>Import Excel
@@ -576,6 +585,8 @@ function processFile(file, type){
       document.getElementById('importZone').style.display='none';
       document.getElementById('dashboard').style.display='block';
       document.getElementById('exportBtn').style.display='inline-flex';
+      document.getElementById('exportDetailedBtn').style.display='inline-flex';
+      document.getElementById('exportAllPdfBtn').style.display='inline-flex';
       renderAll();
       showToast(`Loaded ${emps.length} employees successfully`,'ok');
     }catch(err){ showToast('Parse error: '+err.message,'err'); console.error(err); }
@@ -1245,6 +1256,21 @@ function buildDetailHTML(emp, orig){
         <div style="border-top:1px dashed var(--border);margin:8px 0"></div>
         <div class="dp-net-lbl" style="color:var(--accent)">In-Hand Salary</div>
         <div class="dp-net-val" style="color:${net>=0?'var(--accent)':'var(--red)'};font-size:22px">${inr(net)}</div>`:''}
+        <div style="display:flex;gap:6px;margin-top:12px;justify-content:flex-end">
+          <button onclick="event.stopPropagation();exportEmployeeCSV(${orig})"
+            style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface-el);
+              color:var(--text);cursor:pointer;font-family:var(--sans);font-size:11px;font-weight:600;
+              display:inline-flex;align-items:center;gap:4px" title="Download this employee's day-wise CSV">
+            <span class="material-symbols-outlined" style="font-size:14px">download</span>CSV
+          </button>
+          <button onclick="event.stopPropagation();exportEmployeePDF(${orig})"
+            style="padding:6px 10px;border-radius:7px;border:1px solid var(--accent);background:var(--accent);
+              color:#fff;cursor:pointer;font-family:var(--sans);font-size:11px;font-weight:600;
+              display:inline-flex;align-items:center;gap:4px;box-shadow:0 2px 8px rgba(249,115,22,0.3)"
+              title="Download this employee's PDF salary report">
+            <span class="material-symbols-outlined" style="font-size:14px">picture_as_pdf</span>PDF
+          </button>
+        </div>
       </div>
     </div>
     <!-- short-day alert banner -->
@@ -1485,6 +1511,221 @@ function exportCSV(){
   a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
   a.download='salary_report.csv'; a.click();
   showToast('CSV exported','ok');
+}
+
+// ─── DAY-WISE ROW BUILDER (shared by detailed CSV + per-employee CSV/PDF) ──
+function dayStatusLabel(s){
+  if(!s) return '—';
+  if(s==='P')   return 'Present';
+  if(s==='WOP') return 'WOP (Week-Off Present)';
+  if(s==='A')   return 'Absent';
+  if(s==='WO')  return 'Week Off';
+  if(s.startsWith('L')) return 'Leave';
+  return s;
+}
+function empReqMins(emp){ return emp.shiftReqMins!=null ? emp.shiftReqMins : REQUIRED_MINS; }
+
+function buildEmpDayRows(emp){
+  const reqMins=empReqMins(emp);
+  return emp.days.map(d=>{
+    const {earned, latePenalty=0, lateDed=0, otMins=0, otAmt=0}=calcDayEarn(emp,d);
+    const netH=calcNetHours(d);
+    const isPresent=d.status==='P'||d.status==='WOP';
+    const excelOT=(d.ot && d.ot!=='00:00' && d.ot!=='00:00:00')?d.ot:null;
+    const otStr = otMins>0 ? minsToHHMM(otMins) : (excelOT||'');
+    return {
+      date:d.date, day:d.dayName, status:dayStatusLabel(d.status),
+      shift:d.shift||'—',
+      inTime:d.inTime||'—',
+      outTime:(d.outTime&&d.outTime!=='00:00'&&d.outTime!=='00:00:00')?d.outTime:'—',
+      brk:isPresent?'30 min':'—',
+      netHours:netH!=null?minsToHHMM(netH):'—',
+      reqHours:minsToHHMM(reqMins),
+      ot:otStr||'—',
+      late:latePenalty>0?minsToHHMM(latePenalty):'—',
+      lateDed:latePenalty>0?Math.round(lateDed):0,
+      otAmt:otMins>0?Math.round(otAmt):0,
+      earning:Math.round(earned)
+    };
+  });
+}
+function csvCell(v){ return `"${String(v==null?'':v).replace(/"/g,'""')}"`; }
+function downloadTextFile(filename, content, mime){
+  const a=document.createElement('a');
+  a.href='data:'+mime+';charset=utf-8,'+encodeURIComponent(content);
+  a.download=filename; a.click();
+}
+function safeFileName(s){ return String(s||'employee').trim().replace(/[^a-z0-9]+/gi,'_').replace(/^_+|_+$/g,''); }
+
+// ─── DETAILED (DAY-WISE, ALL EMPLOYEES) CSV ────────────────────
+function exportDetailedCSV(){
+  const header=['Employee Code','Employee Name','Department','Designation','Date','Day','Status','Shift',
+    'Login Time','Logoff Time','Break','Net Hours','Required Hours','OT','Late Deduction','Day Earning (₹)',
+    'Monthly Salary (₹)','Gross Pay (₹)','Total Advance (₹)','In-Hand Pay (₹)'];
+  const rows=[header];
+  employees.forEach((emp,orig)=>{
+    const gross=Math.round(grossPay(emp));
+    const adv=Math.round(totalAdvance(orig));
+    const dept=empDept(emp);
+    buildEmpDayRows(emp).forEach(r=>{
+      rows.push([ 'EMP-'+emp.code, emp.name, dept, emp.desig, r.date, r.day, r.status, r.shift,
+        r.inTime, r.outTime, r.brk, r.netHours, r.reqHours, r.ot, r.late, r.earning,
+        emp.salary, gross, adv, gross-adv ]);
+    });
+  });
+  const csv=rows.map(r=>r.map(csvCell).join(',')).join('\n');
+  downloadTextFile('salary_report_daywise_all_employees.csv', csv, 'text/csv');
+  showToast('Day-wise CSV exported for all employees','ok');
+}
+
+// ─── INDIVIDUAL EMPLOYEE CSV ────────────────────────────────────
+function exportEmployeeCSV(orig){
+  const emp=employees[orig];
+  const gross=Math.round(grossPay(emp)), adv=Math.round(totalAdvance(orig)), net=gross-adv;
+  const header=['Date','Day','Status','Shift','Login Time','Logoff Time','Break','Net Hours',
+    'Required Hours','OT','Late Deduction','Day Earning (₹)'];
+  const rows=[
+    ['Employee Code','EMP-'+emp.code],['Employee Name',emp.name],['Department',empDept(emp)],
+    ['Designation',emp.desig||'—'],['Monthly Salary (₹)',emp.salary],
+    ['Present',emp.totalPresent],['Absent',emp.totalAbsent],['WOP',emp.totalWOP],[],
+    header
+  ];
+  buildEmpDayRows(emp).forEach(r=>{
+    rows.push([r.date,r.day,r.status,r.shift,r.inTime,r.outTime,r.brk,r.netHours,r.reqHours,r.ot,r.late,r.earning]);
+  });
+  rows.push([]);
+  rows.push(['Gross Pay (₹)',gross]);
+  rows.push(['Total Advance (₹)',adv]);
+  rows.push(['In-Hand Pay (₹)',net]);
+  const csv=rows.map(r=>r.map(csvCell).join(',')).join('\n');
+  downloadTextFile(`${safeFileName(emp.name)}_${safeFileName('EMP-'+emp.code)}_daywise.csv`, csv, 'text/csv');
+  showToast(`CSV exported for ${emp.name.split(' ')[0]}`,'ok');
+}
+
+// ─── PDF DOC BUILDER (reused by single-employee and bulk export) ──
+function buildEmployeePDFDoc(orig){
+  const emp=employees[orig];
+  const gross=grossPay(emp), adv=totalAdvance(orig), net=gross-adv;
+  const dayRows=buildEmpDayRows(emp);
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation:'landscape', unit:'pt', format:'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+
+  // Header
+  doc.setFontSize(16); doc.setFont(undefined,'bold');
+  doc.setTextColor(11,31,58);
+  doc.text('RiSync — Employee Salary Report', 40, 40);
+  doc.setFontSize(10); doc.setFont(undefined,'normal');
+  doc.setTextColor(90,112,144);
+  doc.text(`Generated ${new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})}`, pageW-40, 40, {align:'right'});
+
+  // Employee info block
+  doc.setFontSize(12); doc.setFont(undefined,'bold'); doc.setTextColor(11,31,58);
+  doc.text(emp.name||'(No Name)', 40, 64);
+  doc.setFontSize(9); doc.setFont(undefined,'normal'); doc.setTextColor(90,112,144);
+  doc.text(`EMP-${emp.code||'?'}   |   ${emp.desig||'—'}   |   Dept: ${empDept(emp)}`, 40, 78);
+
+  // Summary stats line
+  doc.setFontSize(9); doc.setTextColor(11,31,58);
+  const statsLine = `Present: ${emp.totalPresent}   Absent: ${emp.totalAbsent}   WOP: ${emp.totalWOP}   `+
+    `OT: ${emp.totalOT||'00:00'}   Late: ${emp.totalLate||'00:00'}`;
+  doc.text(statsLine, 40, 96);
+
+  // Day-wise table
+  doc.autoTable({
+    startY: 108,
+    head:[['Date','Day','Status','Shift','Login','Logoff','Break','Net Hrs','Req Hrs','OT','Late','Earning (₹)']],
+    body: dayRows.map(r=>[r.date,r.day,r.status,r.shift,r.inTime,r.outTime,r.brk,r.netHours,r.reqHours,r.ot,r.late,
+      (r.earning===0?'—':(r.earning>0?'+':'')+r.earning.toLocaleString('en-IN'))]),
+    styles:{fontSize:7.5,cellPadding:3,textColor:[11,31,58]},
+    headStyles:{fillColor:[249,115,22],textColor:255,fontStyle:'bold'},
+    alternateRowStyles:{fillColor:[244,246,250]},
+    margin:{left:40,right:40},
+    didParseCell:function(data){
+      if(data.section==='body' && data.column.index===11){
+        const raw=dayRows[data.row.index].earning;
+        if(raw>0) data.cell.styles.textColor=[22,163,74];
+        else if(raw<0) data.cell.styles.textColor=[220,38,38];
+      }
+    }
+  });
+
+  // Salary summary box after table
+  let y = doc.lastAutoTable.finalY + 20;
+  if(y > doc.internal.pageSize.getHeight() - 90){ doc.addPage(); y = 40; }
+  doc.setDrawColor(226,231,240); doc.setFillColor(238,241,247);
+  doc.roundedRect(40, y, pageW-80, 66, 6, 6, 'FD');
+  const colW=(pageW-80)/3;
+  const sumCol=(x,label,val,color)=>{
+    doc.setFontSize(8); doc.setTextColor(90,112,144); doc.setFont(undefined,'normal');
+    doc.text(label, x, y+24, {align:'center'});
+    doc.setFontSize(14); doc.setFont(undefined,'bold'); doc.setTextColor(...color);
+    doc.text(val, x, y+46, {align:'center'});
+  };
+  sumCol(40+colW*0.5, 'GROSS PAY', '₹'+Math.round(gross).toLocaleString('en-IN'), [22,163,74]);
+  sumCol(40+colW*1.5, 'TOTAL ADVANCE', adv>0?'− ₹'+Math.round(adv).toLocaleString('en-IN'):'₹0', adv>0?[220,38,38]:[90,112,144]);
+  sumCol(40+colW*2.5, 'IN-HAND SALARY', '₹'+Math.round(net).toLocaleString('en-IN'), net>=0?[249,115,22]:[220,38,38]);
+
+  // Advance detail list (if any)
+  const advList=advances[orig]||[];
+  if(advList.length){
+    let ay=y+80;
+    if(ay > doc.internal.pageSize.getHeight()-40){ doc.addPage(); ay=40; }
+    doc.autoTable({
+      startY: ay,
+      head:[['Advance Date','Amount (₹)','Note']],
+      body: advList.map(a=>[a.date, Math.round(a.amount).toLocaleString('en-IN'), a.note||'—']),
+      styles:{fontSize:8,cellPadding:3},
+      headStyles:{fillColor:[220,38,38],textColor:255,fontStyle:'bold'},
+      margin:{left:40,right:40}
+    });
+  }
+
+  return doc;
+}
+
+// ─── INDIVIDUAL EMPLOYEE PDF ────────────────────────────────────
+function exportEmployeePDF(orig){
+  if(!window.jspdf){ showToast('PDF library failed to load — check your connection','err'); return; }
+  const emp=employees[orig];
+  const doc=buildEmployeePDFDoc(orig);
+  doc.save(`${safeFileName(emp.name)}_${safeFileName('EMP-'+emp.code)}_salary_report.pdf`);
+  showToast(`PDF exported for ${emp.name.split(' ')[0]}`,'ok');
+}
+
+// ─── BULK: ONE PDF PER EMPLOYEE, PACKAGED AS A ZIP ──────────────
+async function exportAllEmployeePDFs(){
+  if(!window.jspdf){ showToast('PDF library failed to load — check your connection','err'); return; }
+  if(!window.JSZip){ showToast('ZIP library failed to load — check your connection','err'); return; }
+  if(!employees.length){ showToast('No employees loaded','err'); return; }
+
+  showToast(`Generating ${employees.length} PDFs…`,'info');
+  const zip = new JSZip();
+  const usedNames = {};
+
+  for(let orig=0; orig<employees.length; orig++){
+    const emp = employees[orig];
+    const doc = buildEmployeePDFDoc(orig);
+    let base = `${safeFileName(emp.name)}_${safeFileName('EMP-'+emp.code)}`;
+    let fname = base+'_salary_report.pdf';
+    // guard against duplicate filenames (e.g. same name, blank code)
+    if(usedNames[fname]){ usedNames[fname]++; fname = base+'_'+usedNames[fname]+'_salary_report.pdf'; }
+    else usedNames[fname]=1;
+    const blob = doc.output('blob');
+    zip.file(fname, blob);
+    // yield to the browser periodically so the UI doesn't freeze on large rosters
+    if(orig%5===4) await new Promise(res=>setTimeout(res,0));
+  }
+
+  const zipBlob = await zip.generateAsync({type:'blob'});
+  const url = URL.createObjectURL(zipBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `salary_reports_all_employees_${employees.length}.zip`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast(`Downloaded ${employees.length} PDFs as ZIP`,'ok');
 }
 
 function showToast(msg,type='info'){
