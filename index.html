@@ -919,14 +919,16 @@ function netPay(emp,orig){
 
 // Net hours worked in a day from in/out times.
 // Grace-period credit: on shifts with a defined buffer (Shop departments —
-// see SHOP_LATE_GRACE_MINS), clocking in anywhere inside the buffer window
-// costs nothing at all — not a late tag, and not an hours shortfall either.
-// Without this, someone forgiven the "late" tag for arriving at 9:10 (grace
-// to 9:15) was still losing the same minutes as a "partial hours" deduction,
-// because net hours were always measured from the actual clock-in time —
-// so the buffer was cosmetic instead of real. Past the buffer, actual
-// clock-in time counts fully, consistent with the late deduction that also
-// applies past the buffer.
+// see SHOP_LATE_GRACE_MINS), the first buffer minutes of lateness always
+// cost nothing — never a late tag, and never an hours shortfall. Only
+// minutes actually beyond the buffer count against them, and they count
+// for exactly that amount (not the full gap from shift start). E.g. on a
+// 10:00 AM shift with a 15-min buffer, clocking in at 10:19 is treated as
+// if they arrived at 10:04 for hours purposes (4 min beyond the buffer) —
+// not as if they arrived at 10:19 (which would wipe out the whole 15-min
+// grace the moment someone steps even a minute past it). This mirrors
+// exactly how the late deduction itself is computed, so the same minutes
+// are never charged twice under two different labels.
 function calcNetHours(emp, day){
   const st=day.status;
   if(!st||st==='WO'||st==='A') return null;
@@ -935,8 +937,9 @@ function calcNetHours(emp, day){
   let inM=inMraw;
   const rawStart = emp && emp.shiftStartMins!=null ? emp.shiftStartMins : null;
   const cutoff    = emp && emp.shiftLateCutoffMins!=null ? emp.shiftLateCutoffMins : null;
-  if(rawStart!=null && cutoff!=null && cutoff>rawStart && inMraw>rawStart && inMraw<=cutoff){
-    inM = rawStart; // inside the grace window — treat as arrived exactly on time
+  if(rawStart!=null && cutoff!=null && cutoff>rawStart && inMraw>rawStart){
+    const excessBeyondGrace = Math.max(0, inMraw - cutoff);
+    inM = rawStart + excessBeyondGrace;
   }
   let diff = outM >= inM ? outM-inM : (24*60 - inM + outM); // handle past midnight
   return Math.max(0, diff - BREAK);
